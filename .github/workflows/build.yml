@@ -1,0 +1,79 @@
+name: Build OpenWrt 25.12 x86-64 EFI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          large-packages: true
+
+      - name: Init Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+          gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev \
+          swig python3-dev libelf-dev qemu-utils
+
+      - name: Clone OpenWrt Source
+        run: |
+          git clone --depth 1 -b v25.12.0 https://github.com/openwrt/openwrt.git openwrt
+          # 删除官方源码自带的 Workflow 干扰
+          rm -rf openwrt/.github/workflows
+
+      - name: Inject Passwall
+        run: |
+          cd openwrt
+          echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
+          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
+          ./scripts/feeds update -a
+          # 清理旧包冲突
+          rm -rf feeds/packages/net/xray-core feeds/packages/net/sing-box
+          ./scripts/feeds install -a
+
+      - name: Load Config
+        run: |
+          cp seed.config openwrt/.config
+          cd openwrt
+          make defconfig
+
+      - name: Compile
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Prepare Release Files
+        run: |
+          mkdir -p release_files
+          cd openwrt/bin/targets/x86/64/
+          for file in *combined-efi.img.gz; do
+            cp "$file" "../../../../release_files/OpenWrt-25.12.0-x86-64-$(date +%Y%m%d)-combined-efi.img.gz"
+          done
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v25.12.0-${{ github.run_id }}
+          name: OpenWrt 25.12.0 x86-64 (Passwall Inside)
+          body: |
+            定制版 OpenWrt 25.12.0 编译成功！
+            - 驱动支持: i225/i226, i350, X550
+            - 插件支持: Passwall (Nftables 版)
+            - 引导方式: UEFI (combined-efi.img.gz)
+          files: release_files/*.img.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
