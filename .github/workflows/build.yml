@@ -26,12 +26,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
           gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev \
-          swig python3-dev libelf-dev qemu-utils
+          swig python3-dev libelf-dev qemu-utils jq
 
       - name: Clone OpenWrt Source
         run: |
+          # 克隆官方 25.12.0 源码
           git clone --depth 1 -b v25.12.0 https://github.com/openwrt/openwrt.git openwrt
-          # 删除官方源码自带的 Workflow 干扰
+          # 删除官方自带的 Workflow 避免干扰
           rm -rf openwrt/.github/workflows
 
       - name: Inject Passwall
@@ -40,26 +41,40 @@ jobs:
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
           ./scripts/feeds update -a
-          # 清理旧包冲突
+          # 移除可能冲突的旧包
           rm -rf feeds/packages/net/xray-core feeds/packages/net/sing-box
           ./scripts/feeds install -a
 
+      - name: Fix Rust LLVM CI Error
+        run: |
+          cd openwrt
+          # 核心修复：强制修改 Rust 编译器的 LLVM 下载策略，防止 CI 环境下 Panic
+          echo "正在修复 Rust 编译环境冲突..."
+          find feeds/packages/lang/rust -name "*.toml" -o -name "Makefile" | xargs sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' || true
+          find feeds/packages/lang/rust -name "*.sh" | xargs sed -i 's/download-ci-llvm=true/download-ci-llvm="if-unchanged"/g' || true
+          # 针对 Makefile 的特定兜底修改
+          [ -f feeds/packages/lang/rust/Makefile ] && sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' feeds/packages/lang/rust/Makefile || true
+
       - name: Load Config
         run: |
-          cp seed.config openwrt/.config
+          # 将根目录的 seed.config 放入编译目录
+          [ -f seed.config ] && cp seed.config openwrt/.config || echo "Warning: seed.config not found!"
           cd openwrt
           make defconfig
 
       - name: Compile
         run: |
           cd openwrt
+          # 先下载所有源码包
           make download -j$(nproc)
+          # 开始正式编译
           make -j$(nproc) || make -j1 V=s
 
       - name: Prepare Release Files
         run: |
           mkdir -p release_files
           cd openwrt/bin/targets/x86/64/
+          # 筛选并重命名 EFI 镜像
           for file in *combined-efi.img.gz; do
             cp "$file" "../../../../release_files/OpenWrt-25.12.0-x86-64-$(date +%Y%m%d)-combined-efi.img.gz"
           done
@@ -68,12 +83,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v25.12.0-${{ github.run_id }}
-          name: OpenWrt 25.12.0 x86-64 (Passwall Inside)
+          name: OpenWrt 25.12.0 x86-64 (Custom Build)
           body: |
-            定制版 OpenWrt 25.12.0 编译成功！
-            - 驱动支持: i225/i226, i350, X550
-            - 插件支持: Passwall (Nftables 版)
-            - 引导方式: UEFI (combined-efi.img.gz)
+            ## 固件信息
+            - **版本**: OpenWrt 25.12.0 官方源码
+            - **内核**: Linux 6.12
+            - **驱动**: 已集成 Intel i225/i226, i350, X550 支持
+            - **功能**: 已集成 Passwall 最新版 (Xray/Sing-Box 核心)
+            - **编译时间**: ${{ github.event.head_commit.timestamp }}
           files: release_files/*.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
