@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Ultimate-Final
+name: OpenWrt-25.12.0-Official-Release
 
 on:
   workflow_dispatch:
@@ -29,56 +29,53 @@ jobs:
       - name: 下载源码
         run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 强制修正版本标识与源
+      - name: 强制同步官方 25.12.0 正式版源
         run: |
           cd openwrt
-          # 1. 强行将 SNAPSHOT 替换为 25.12.0 正式版标识
+          # 1. 修正版本定义，对齐官方正式路径
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
           
-          # 2. 锁定 Feeds 到稳定分支
-          sed -i 's/master/openwrt-25.12/g' feeds.conf.default
-          sed -i 's/main/openwrt-25.12/g' feeds.conf.default
+          # 2. 注入 Passwall 源码 Feeds (本地编译以防万一)
+          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds install luci-lua-runtime
 
-      - name: 注入核心配置与依赖
+      - name: 注入配置补丁
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
           {
-            # 网页与语言
+            # 基础环境与正式版标识
+            echo "CONFIG_VERSION_SNAPSHOT=n"
+            echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci=y"
-            echo "CONFIG_PACKAGE_uhttpd=y"
-            echo "CONFIG_LUCI_LANG_zh_Hans=y"
-            # Passwall 菜单显示的必要补丁
             echo "CONFIG_PACKAGE_luci-compat=y"
-            echo "CONFIG_PACKAGE_luci-lib-ipkg=y"
-            # 强制替换 dnsmasq 为 dnsmasq-full
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_LUCI_LANG_zh_Hans=y"
+            
+            # DNS 替换
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
-            echo "CONFIG_PACKAGE_dnsmasq_full_ipset=y"
-            echo "CONFIG_PACKAGE_dnsmasq_full_nftset=y"
+            
+            # 确保 Passwall 核心在固件内
+            echo "CONFIG_PACKAGE_luci-app-passwall=y"
+            echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y"
           } >> .config
           make defconfig
 
-      - name: 启动编译 (多线程)
+      - name: 启动编译
         run: |
           cd openwrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理并发布固件
+      - name: 发布固件
         uses: softprops/action-gh-release@v1
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 25.12-Stable-Final
+          tag_name: 25.12.0-Official
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
-          body: |
-            OpenWrt 25.12.0 最终现成版
-            - 默认 IP: 192.168.1.1
-            - 移除 dnsmasq，集成 dnsmasq-full
-            - 集成 Passwall (Xray/Sing-Box/Hysteria)
-            - 强制 Release 源，拒绝 SNAPSHOT
