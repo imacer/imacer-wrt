@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Release-Final
+name: OpenWrt-25.12-Ultimate-Final
 
 on:
   workflow_dispatch:
@@ -22,50 +22,63 @@ jobs:
 
       - name: 初始化编译环境
         run: |
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/anthony65535/scripts/master/openwrt-env-full)
           sudo timedatectl set-timezone "$TZ"
 
       - name: 下载源码
-        run: |
-          git clone $REPO_URL -b $REPO_BRANCH openwrt
+        run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 强制锁定 Release 源 (拒绝 Snapshots)
+      - name: 强制修正版本标识与源
         run: |
           cd openwrt
-          # 将 feeds 中所有可能指向 master/main 的地方强制改为 25.12 分支
+          # 1. 强行将 SNAPSHOT 替换为 25.12.0 正式版标识
+          sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
+          sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
+          
+          # 2. 锁定 Feeds 到稳定分支
           sed -i 's/master/openwrt-25.12/g' feeds.conf.default
           sed -i 's/main/openwrt-25.12/g' feeds.conf.default
+          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载配置与补丁
+      - name: 注入核心配置与依赖
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 强制注入网页服务与 Passwall 依赖，确保 Release 版兼容性
           {
+            # 网页与语言
             echo "CONFIG_PACKAGE_luci=y"
             echo "CONFIG_PACKAGE_uhttpd=y"
-            echo "CONFIG_PACKAGE_uhttpd-mod-ubus=y"
+            echo "CONFIG_LUCI_LANG_zh_Hans=y"
+            # Passwall 菜单显示的必要补丁
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lib-ipkg=y"
-            echo "CONFIG_LUCI_LANG_zh_Hans=y"
-            echo "CONFIG_VERSION_SNAPSHOT=n"
+            # 强制替换 dnsmasq 为 dnsmasq-full
+            echo "CONFIG_PACKAGE_dnsmasq=n"
+            echo "CONFIG_PACKAGE_dnsmasq-full=y"
+            echo "CONFIG_PACKAGE_dnsmasq_full_ipset=y"
+            echo "CONFIG_PACKAGE_dnsmasq_full_nftset=y"
           } >> .config
           make defconfig
 
-      - name: 编译固件
+      - name: 启动编译 (多线程)
         run: |
           cd openwrt
           make -j$(nproc) || make -j1 V=s
 
-      - name: 整理并上传
+      - name: 整理并发布固件
         uses: softprops/action-gh-release@v1
         if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v25.12-Stable-${{ github.run_id }}
+          tag_name: 25.12-Stable-Final
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
+          body: |
+            OpenWrt 25.12.0 最终现成版
+            - 默认 IP: 192.168.1.1
+            - 移除 dnsmasq，集成 dnsmasq-full
+            - 集成 Passwall (Xray/Sing-Box/Hysteria)
+            - 强制 Release 源，拒绝 SNAPSHOT
