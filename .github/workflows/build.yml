@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: 检查项目
-        uses: actions/checkout@v4
+        uses: checkout@v4
 
       - name: 初始化编译环境
         run: |
@@ -29,18 +29,23 @@ jobs:
       - name: 下载源码
         run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 强制同步官方 25.12.0 正式版源
+      - name: 更新 Feeds 并强力修复 Passwall 下载
         run: |
           cd openwrt
-          # 1. 修正版本定义，对齐官方正式路径
+          # 1. 修正版本号对齐官方 25.12.0 路径
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
           
-          # 2. 注入 Passwall 源码 Feeds (本地编译以防万一)
+          # 2. 注入 Passwall 源码
           echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default
           
+          # 3. 分步执行：先更新全部，再专门更新并安装 passwall
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds update passwall
+          ./scripts/feeds install -p passwall -a
+          
+          # 4. 补齐 25.12 必需的 Lua 环境
           ./scripts/feeds install luci-lua-runtime
 
       - name: 注入配置补丁
@@ -48,19 +53,13 @@ jobs:
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
           {
-            # 基础环境与正式版标识
             echo "CONFIG_VERSION_SNAPSHOT=n"
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci=y"
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            echo "CONFIG_LUCI_LANG_zh_Hans=y"
-            
-            # DNS 替换
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
-            
-            # 确保 Passwall 核心在固件内
             echo "CONFIG_PACKAGE_luci-app-passwall=y"
             echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y"
           } >> .config
@@ -77,5 +76,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 25.12.0-Official
+          tag_name: 25.12.0-Official-Fixed
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
