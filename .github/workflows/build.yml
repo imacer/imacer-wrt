@@ -1,24 +1,15 @@
-name: OpenWrt-25.12-Final-Build
+name: OpenWrt-25.12-Release-Final
 
 on:
-  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: '是否开启 SSH 调试'
-        required: false
-        default: 'false'
+  push:
+    paths:
+      - 'seed.config'
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-25.12
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: seed.config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_ARMOR_DIR: false
-  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
 jobs:
@@ -30,78 +21,51 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 初始化编译环境
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/anthony65535/scripts/master/openwrt-env-full)
-          sudo -E apt-get -qq autoremove --purge
-          sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "$TZ"
-          sudo mkdir -p /workdir
-          sudo chown $USER:$GROUPS /workdir
 
       - name: 下载源码
-        working-directory: /workdir
         run: |
-          df -hT $PWD
           git clone $REPO_URL -b $REPO_BRANCH openwrt
-          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-      - name: 加载并更新 Feeds
+      - name: 强制锁定 Release 源 (拒绝 Snapshots)
         run: |
           cd openwrt
+          # 将 feeds 中所有可能指向 master/main 的地方强制改为 25.12 分支
+          sed -i 's/master/openwrt-25.12/g' feeds.conf.default
+          sed -i 's/main/openwrt-25.12/g' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载 Seed 配置并强制补丁
+      - name: 加载配置与补丁
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          
-          # 核心补丁：确保 LuCI 和 uhttpd 绝对不会被剔除
-          echo "CONFIG_PACKAGE_luci=y" >> .config
-          echo "CONFIG_PACKAGE_luci-base=y" >> .config
-          echo "CONFIG_PACKAGE_uhttpd=y" >> .config
-          echo "CONFIG_PACKAGE_uhttpd-mod-ubus=y" >> .config
-          echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> .config
-          echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          
-          # 物理阻断可能会报错的 Shadowsocks-Rust 组件
-          echo "CONFIG_PACKAGE_shadowsocks-rust-ss-local=n" >> .config
-          echo "CONFIG_PACKAGE_shadowsocks-rust-ss-server=n" >> .config
-          
+          # 强制注入网页服务与 Passwall 依赖，确保 Release 版兼容性
+          {
+            echo "CONFIG_PACKAGE_luci=y"
+            echo "CONFIG_PACKAGE_uhttpd=y"
+            echo "CONFIG_PACKAGE_uhttpd-mod-ubus=y"
+            echo "CONFIG_PACKAGE_luci-compat=y"
+            echo "CONFIG_PACKAGE_luci-lib-ipkg=y"
+            echo "CONFIG_LUCI_LANG_zh_Hans=y"
+            echo "CONFIG_VERSION_SNAPSHOT=n"
+          } >> .config
           make defconfig
 
-      - name: 启动编译 (多线程)
-        id: compile
+      - name: 编译固件
         run: |
           cd openwrt
-          echo -e "$(nproc) thread compile"
-          make -j$(nproc) || make -j1 || make -j1 V=s
-          echo "status=success" >> $GITHUB_OUTPUT
+          make -j$(nproc) || make -j1 V=s
 
-      - name: 整理输出文件
-        id: organize
-        if: steps.compile.outputs.status == 'success'
-        run: |
-          cd openwrt/bin/targets/*/*
-          rm -rf packages
-          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
-
-      - name: 上传固件到 Release
+      - name: 整理并上传
         uses: softprops/action-gh-release@v1
-        if: steps.organize.outputs.status == 'success'
+        if: success()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: OpenWrt-25.12-Final-${{ github.run_id }}
-          files: ${{ env.FIRMWARE }}/*combined-efi.img.gz
-          body: |
-            这是基于 OpenWrt 25.12 的最终满血版固件。
-            - 包含 Passwall 全套组件 (Xray, Sing-Box, Hysteria 等)
-            - 强制集成 LuCI 简体中文界面
-            - 默认 IP: 192.168.1.1
+          tag_name: v25.12-Stable-${{ github.run_id }}
+          files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
