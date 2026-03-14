@@ -1,4 +1,4 @@
-name: OpenWrt-25.12.0-Official-Plus-Passwall
+name: OpenWrt-25.12-Fixed-Build
 
 on:
   workflow_dispatch:
@@ -17,62 +17,62 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: 检查项目
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 初始化编译环境
+      - name: 初始化环境
         run: |
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/anthony65535/scripts/master/openwrt-env-full)
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 下载源码
-        run: git clone $REPO_URL -b $REPO_BRANCH openwrt
-
-      - name: 注入双源与对齐官方路径
+      - name: 克隆源码并同步 Feeds
         run: |
+          git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 1. 修正版本号对齐官方 25.12.0
-          sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
-          sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
-          
-          # 2. 注入 Passwall 源码
+          # 注入 Passwall 源码
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
+          # 核心修复：清理并重置索引
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-          # 3. 补齐运行时
-          ./scripts/feeds install luci-lua-runtime luci-compat
+          ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 注入配置补丁
+      - name: 注入配置与补丁
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
+          
+          # 修复 25.12.0 版本号识别与依赖冲突
+          sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
-            echo "CONFIG_VERSION_SNAPSHOT=n"
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
+            echo "CONFIG_VERSION_CODE=\"\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
           } >> .config
           
-          # 强制将选中的模块内置
+          # 强制将选中的模块从 'm' 改为 'y' (内置)
           sed -i 's/=m/=y/g' .config
+          rm -rf tmp
           make defconfig
 
-      - name: 启动编译
+      - name: 执行编译
         run: |
           cd openwrt
+          # 增加文件描述符限制，防止 APK 打包报错
+          ulimit -n 65535
+          # 多线程失败则自动转单线程输出详细日志
           make -j$(nproc) || make -j1 V=s
 
-      - name: 发布固件
+      - name: 发布到 Release
         uses: softprops/action-gh-release@v1
         if: success()
+        with:
+          tag_name: 25.12.0-Final-Plus
+          files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: 25.12.0-Official-Final
-          files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
