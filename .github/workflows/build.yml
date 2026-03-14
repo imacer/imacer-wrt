@@ -1,4 +1,4 @@
-name: OpenWrt-25.12.0-Official-Release
+name: OpenWrt-25.12.0-Passwall-Latest
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: 检查项目
-        uses: checkout@v4
+        uses: actions/checkout@v4
 
       - name: 初始化编译环境
         run: |
@@ -29,24 +29,22 @@ jobs:
       - name: 下载源码
         run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 更新 Feeds 并强力修复 Passwall 下载
+      - name: 注入 Passwall 最新双源 (新架构)
         run: |
           cd openwrt
-          # 1. 修正版本号对齐官方 25.12.0 路径
+          # 1. 对齐官方 25.12.0 正式版路径
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
           
-          # 2. 注入 Passwall 源码
-          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default
+          # 2. 在顶部插入 Passwall 最新代码源 (方法 1)
+          # 注意：使用双引号并在顶部插入，确保优先级最高
+          sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
+          sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
-          # 3. 分步执行：先更新全部，再专门更新并安装 passwall
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          ./scripts/feeds update passwall
-          ./scripts/feeds install -p passwall -a
-          
-          # 4. 补齐 25.12 必需的 Lua 环境
-          ./scripts/feeds install luci-lua-runtime
+          # 3. 必须安装 Lua 环境，否则最新版在 25.12 下依然无法显示
+          ./scripts/feeds install luci-lua-runtime luci-compat
 
       - name: 注入配置补丁
         run: |
@@ -55,13 +53,10 @@ jobs:
           {
             echo "CONFIG_VERSION_SNAPSHOT=n"
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
-            echo "CONFIG_PACKAGE_luci=y"
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
-            echo "CONFIG_PACKAGE_luci-app-passwall=y"
-            echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y"
           } >> .config
           make defconfig
 
@@ -76,5 +71,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 25.12.0-Official-Fixed
+          tag_name: 25.12.0-Passwall-Latest-Code
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
