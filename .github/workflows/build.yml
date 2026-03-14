@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-Full-Manual
+name: OpenWrt-25.12-Final-Safe-V4
 
 on:
   workflow_dispatch:
@@ -20,38 +20,30 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 准备编译环境 (修正依赖包名并清理空间)
+      - name: 2. 准备编译环境 (彻底移除错误包名)
         run: |
-          # 释放虚拟机磁盘空间，确保 1GB 固件生成有足够缓存
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup
-          
-          # 安装编译 OpenWrt 必需的基础软件包 (已修正 liblzo2-dev)
           sudo -E apt-get -qq update
+          # 注意：下面这一行已经删除了那个报错的 lzo-alternate 包名
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-          
           sudo timedatectl set-timezone "$TZ"
 
       - name: 3. 克隆源码并同步 Feeds
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 注入 Passwall 官方源码源
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
-          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-          # 【核心修复】解决 Rust 1.90.0 在 CI 环境下 download-ci-llvm 的报错
+          # 【核心修复】解决 Rust 1.90.0 的 CI 编译报错 (Error 1)
           find feeds/packages/lang/rust -name Makefile -exec sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' {} +
-          
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置并强制转换
+      - name: 4. 注入配置并强制内建
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 修改版本号显示为 25.12.0
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
@@ -60,28 +52,22 @@ jobs:
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
           } >> .config
-          
-          # 核心技巧：将所有选中的包强制设为内建(y)，确保功能不丢失
           sed -i 's/=m/=y/g' .config
-          
-          # 清理旧索引并根据 seed.config 生成最终配置
           rm -rf tmp
           make defconfig
 
       - name: 5. 执行正式编译
         run: |
           cd openwrt
-          # 编译前清理 Docker 镜像以腾出额外空间
           sudo docker image prune -a -f
           ulimit -n 65535
-          # 开始编译，如果报错会自动转为 V=s 单线程模式显示错误细节
           make -j$(nproc) || make -j1 V=s
 
-      - name: 6. 发布固件至 Release
+      - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Final-Full-Edition
+          tag_name: 25.12.0-Final-V4
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
