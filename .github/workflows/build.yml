@@ -1,4 +1,4 @@
-name: OpenWrt-25.12.0-Passwall-Latest
+name: OpenWrt-25.12.0-Final-Integrated
 
 on:
   workflow_dispatch:
@@ -29,21 +29,22 @@ jobs:
       - name: 下载源码
         run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 注入 Passwall 最新双源 (新架构)
+      - name: 注入 Passwall 双源与对齐版本号
         run: |
           cd openwrt
-          # 1. 对齐官方 25.12.0 正式版路径
+          # 1. 强制对齐官方正式版路径 25.12.0
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
           
-          # 2. 在顶部插入 Passwall 最新代码源 (方法 1)
-          # 注意：使用双引号并在顶部插入，确保优先级最高
+          # 2. 注入最新双源：passwall_packages 提供 33 个组件，passwall 提供 UI
+          # 注意：第二个名字必须叫 passwall，否则配置查找会报错
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
-          sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
+          sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 3. 必须安装 Lua 环境，否则最新版在 25.12 下依然无法显示
+          
+          # 3. 补齐 25.12 环境必需的运行时
           ./scripts/feeds install luci-lua-runtime luci-compat
 
       - name: 注入配置补丁
@@ -60,7 +61,7 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 启动编译
+      - name: 启动多线程编译
         run: |
           cd openwrt
           make -j$(nproc) || make -j1 V=s
@@ -71,5 +72,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 25.12.0-Passwall-Latest-Code
+          tag_name: 25.12.0-Official-Full
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
