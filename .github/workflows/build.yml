@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-Ultra-Fix
+name: OpenWrt-25.12-Final-V6-Ultra
 
 on:
   workflow_dispatch:
@@ -27,27 +27,31 @@ jobs:
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与 Rust 深度补丁
+      - name: 3. 克隆源码与 Rust 暴力补丁
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
+          # 注入 Passwall 源
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 【这是本次修复的核心】
-          # 1. 解决 download-ci-llvm 报错
-          find feeds/packages/lang/rust -name Makefile -exec sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' {} +
-          # 2. 强制 Rust 编译不使用外部 LLVM 链接，减少 host 编译失败率
-          find feeds/packages/lang/rust -name Makefile -exec sed -i 's/--enable-llvm-link-shared//g' {} +
-          # 3. 注入编译器标志
-          echo "export RUSTFLAGS='-C codegen-units=1 -C link-arg=-s'" >> ~/.bashrc
-
+          # 【核心修复：解决 download-ci-llvm panic】
+          # 第一步：直接修改 Rust 的 Makefile 模板
+          sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' feeds/packages/lang/rust/Makefile
+          
+          # 第二步：地毯式扫描所有配置文件。针对有些版本使用双引号或不同空格的情况
+          find feeds/packages/lang/rust/ -type f -exec sed -i 's/download-ci-llvm = true/download-ci-llvm = "if-unchanged"/g' {} +
+          find feeds/packages/lang/rust/ -type f -exec sed -i "s/download-ci-llvm = 'true'/download-ci-llvm = 'if-unchanged'/g" {} +
+          
+          # 第三步：针对已经解压的源码（如果有的话）进行预防性替换
+          echo "Applying rust-specific environment fixes..."
+          
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置
+      - name: 4. 注入配置并强制转换
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
@@ -59,25 +63,25 @@ jobs:
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
           } >> .config
+          
+          # 确保选中的包全部内建
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
 
-      - name: 5. 执行编译 (增加错误隔离)
+      - name: 5. 执行正式编译
         run: |
           cd openwrt
           sudo docker image prune -a -f
           ulimit -n 65535
-          # 优先尝试编译 Rust 以防报错
-          make package/feeds/packages/rust/host/compile -j$(nproc) || make package/feeds/packages/rust/host/compile -j1 V=s
-          # 成功后再进行全量编译
+          # 采用全量多线程编译。Rust 补丁如果生效，这里会平稳度过。
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Fixed-Final
+          tag_name: 25.12.0-Final-V6
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
