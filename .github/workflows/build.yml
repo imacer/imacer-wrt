@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V7-SkipRust
+name: OpenWrt-25.12-Final-V7-SystemRust
 
 on:
   workflow_dispatch:
@@ -20,15 +20,15 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 准备编译环境 (注入系统 Rust)
+      - name: 2. 准备编译环境 (提前安装系统 Rust)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup
           sudo -E apt-get -qq update
-          # 关键点：提前安装系统级 rustc 和 cargo，为后续借用做准备
+          # 关键点：直接把系统级的 rustc 和 cargo 装上，替代源码里的那个会报错的版本
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev rustc cargo
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与规避 Rust 编译
+      - name: 3. 克隆源码与“釜底抽薪”
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
@@ -38,13 +38,13 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 【核心战术】既然 feeds 里的 rust 编译不通，我们直接把它删掉或屏蔽
-          # 让系统在寻找 rustc 时直接去 /usr/bin/ 下找，而不是自己编
+          # 【这是本次最关键的一步】
+          # 直接物理删除源码里的 rust 文件夹，防止它启动那个会报错的编译脚本
           rm -rf feeds/packages/lang/rust
           
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置并强制转换
+      - name: 4. 注入配置
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
@@ -58,7 +58,6 @@ jobs:
           } >> .config
           
           sed -i 's/=m/=y/g' .config
-          # 检查是否有依赖 rust 的包因为我们删了 feeds/rust 而报错，如果报错则强制使用系统 rust
           rm -rf tmp
           make defconfig
 
@@ -67,14 +66,14 @@ jobs:
           cd openwrt
           sudo docker image prune -a -f
           ulimit -n 65535
-          # 此时编译系统会自动寻找 PATH 里的 rustc（即系统安装的）
+          # 核心插件现在会自动链接到系统级的 rustc 运行
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V7-Final
+          tag_name: 25.12.0-V7-Success
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
