@@ -1,4 +1,4 @@
-name: OpenWrt-25.12.0-Final-Integrated
+name: OpenWrt-25.12.0-Final-Professional
 
 on:
   workflow_dispatch:
@@ -29,25 +29,24 @@ jobs:
       - name: 下载源码
         run: git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 注入 Passwall 双源与对齐版本号
+      - name: 注入 Passwall 双源与正式版路径对齐
         run: |
           cd openwrt
-          # 1. 强制对齐官方正式版路径 25.12.0
+          # 1. 修正版本定义，确保对齐官方 25.12.0 下载路径
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/SNAPSHOT/25.12.0/g' package/base-files/image-config.in
           
-          # 2. 注入最新双源：passwall_packages 提供 33 个组件，passwall 提供 UI
-          # 注意：第二个名字必须叫 passwall，否则配置查找会报错
+          # 2. 注入最新双源：Packages 源提供 33 个二进制文件，Passwall 源提供 UI
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 3. 补齐 25.12 环境必需的运行时
+          # 3. 补齐 25.12 UI 环境
           ./scripts/feeds install luci-lua-runtime luci-compat
 
-      - name: 注入配置补丁
+      - name: 注入配置补丁 (强制内置化)
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
@@ -59,6 +58,9 @@ jobs:
             echo "CONFIG_PACKAGE_dnsmasq=n"
             echo "CONFIG_PACKAGE_dnsmasq-full=y"
           } >> .config
+          
+          # 核心技巧：强制将所有设为模块 (m) 的包提升为内置 (y)
+          sed -i 's/=m/=y/g' .config
           make defconfig
 
       - name: 启动多线程编译
@@ -72,5 +74,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 25.12.0-Official-Full
+          tag_name: 25.12.0-Ultimate-Build
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
