@@ -1,4 +1,4 @@
-name: OpenWrt-V57
+name: OpenWrt-V58
 
 on:
   workflow_dispatch:
@@ -45,20 +45,10 @@ jobs:
           # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 【V57 核心修复】：使用更简单安全的办法注入 Lua 声明
-          # 直接在定义行后面插入 LUA_RELEASE，避免使用复杂的 Build/Prepare 嵌套
-          LUA_MAKEFILE="package/utils/lua/Makefile"
-          if [ -f "$LUA_MAKEFILE" ]; then
-            sed -i '/PKG_INSTALL:=1/a TARGET_CFLAGS += -DLUA_RELEASE=\\"Lua 5.1.5\\"' "$LUA_MAKEFILE"
-          fi
-
-          # 3. 注入 GCC 14 全局降压参数
-          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
-          
-          # 4. 修复 mtools
+          # 2. 修复 mtools (Ubuntu 24.04 兼容)
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
-          # 5. 应用配置
+          # 3. 应用配置
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -71,15 +61,16 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 最终编译执行
+      - name: 5. 最终编译执行 (强制宏注入)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
           make download -j8 || true
           
-          # 增加一个针对符号冲突的全局导出
-          export EXTRA_CFLAGS="-fcommon -Dprogram_invocation_name=prg_inv_name"
+          # 【V58 核心】：使用单引号包裹双引号的极致转义，确保 LUA_RELEASE 作为一个带引号的字符串传入 C 代码
+          # 同时使用 -fpermissive 强迫 GCC 14 接受不规范的代码
+          export EXTRA_CFLAGS='-fcommon -fpermissive -D_GNU_SOURCE -DLUA_RELEASE="\"Lua 5.1.5\"" -Dprogram_invocation_name=prg_inv_name -Wno-error=incompatible-pointer-types'
           
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS" || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS"
