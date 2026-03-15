@@ -26,7 +26,7 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方 Rust 编译器 (满足 Shadowsocks-Rust 等 1.80+ 的版本要求)
+          # 安装官方 Rust 编译器 (确保版本满足 Shadowsocks-Rust 等 1.80+ 的硬性需求)
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
@@ -35,15 +35,15 @@ jobs:
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 注入 Passwall 插件源
+          # 注入 Passwall 及其依赖包源
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 【核心修复：抹除对 rust/host 的构建依赖】
-          # 强制让所有插件不再去触发 OpenWrt 源码里那个会报错的 Rust 编译任务
+          # 【V18 核心必杀：抹除对 rust/host 的构建依赖】
+          # 强制让所有插件不再去触发 OpenWrt 源码里那个会 Panic 的 Rust 编译任务
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           find package/feeds/ -name "Makefile" | xargs sed -i 's/+rust//g' 2>/dev/null || true
           
@@ -53,22 +53,22 @@ jobs:
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 强制指定版本号
+          # 强制指定版本号，避免 SNAPSHOT 导致插件不兼容
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            # 彻底禁用源码包中的 rust 编译，防止干扰
+            # 彻底禁用源码包中的 rust 编译，防止冲突
             echo "CONFIG_PACKAGE_rust=n"
           } >> .config
           
-          # 转换所有模块为集成模式
+          # 转换所有模块为集成模式 (y)
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
 
-      - name: 5. 执行正式编译 (路径强力注入版)
+      - name: 5. 执行正式编译 (全路径强力注入版)
         run: |
           cd openwrt
           # 激活刚才安装的官方 Rust
@@ -81,19 +81,19 @@ jobs:
           cp -af $(which cargo) staging_dir/host/bin/cargo
           cp -af $(which rustdoc) staging_dir/host/bin/rustdoc
           
-          # 透传环境变量，解决所有子进程的路径问题
+          # 设置并透传环境变量
           export PATH="$HOME/.cargo/bin:$PATH"
           export CARGO_HOME="$HOME/.cargo"
           
           ulimit -n 65535
-          # 开启编译
+          # 开启全量编译
           make -j$(nproc) PATH="$PATH" CARGO_HOME="$CARGO_HOME" || make -j1 V=s PATH="$PATH" CARGO_HOME="$CARGO_HOME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Final-Stable
+          tag_name: 25.12.0-Final-V18
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
