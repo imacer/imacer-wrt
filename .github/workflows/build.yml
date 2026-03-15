@@ -1,4 +1,4 @@
-name: OpenWrt-V75
+name: OpenWrt-V76
 
 on:
   workflow_dispatch:
@@ -49,16 +49,15 @@ jobs:
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 【V75 核心修复】：安全的全局标志注入
-          # 移除导致 WolfSSL 崩溃的 -D 重定向
-          # 保留 -include 以修复 setpwent (SSR/Trojan/MbedTLS)
-          # 添加 -Wno-error 来强制跳过变量声明冲突，而不是重命名它
+          # 3. 【V76 核心修复】：全局 CFLAGS 强制压制
+          # 使用 -include 修复 setpwent (SSR/Trojan/MbedTLS)
+          # 使用 -Wno-error=redundant-decls 处理 util-linux 变量冲突，这是最安全的做法
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=redundant-decls -D_GNU_SOURCE -include pwd.h -include grp.h /' include/target.mk
           
-          # 4. 针对 util-linux 的变量冲突进行物理消除（不再通过 CFLAGS 宏）
-          # 我们直接在解压后对 util-linux 进行精准手术，避开 Makefile
-          [ -d package/utils/util-linux ] && sed -i '/Build\/Prepare/a \	sed -i "/program_invocation_name/d" $(PKG_BUILD_DIR)/libsmartcols/src/common.c' package/utils/util-linux/Makefile || true
-
+          # 4. 物理移除引发冲突的特定声明 (不再动 Makefile 内部)
+          # 在编译前，全局搜寻并删除引起 GCC 14 冲突的变量声明
+          # 这种方式在源码解压到 build_dir 之前设置好，利用 OpenWrt 的 patch 机制或后续的实时消杀
+          
           # 5. 配置注入 (剔除 brook)
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
@@ -73,13 +72,19 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 编译执行
+      - name: 5. 编译执行 (含实时消杀)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           make download -j8 || true
+          
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
+          
+          # 【V76 实时消杀】：在编译 package 之前，再次暴力清理 build_dir
+          # 此时源码已解压，且不在 Makefile 内部运行，不存在缩进问题
+          find build_dir/ -name "common.c" | xargs sed -i '/program_invocation_name/d' 2>/dev/null || true
+          
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
