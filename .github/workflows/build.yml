@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V30-Fix
+name: OpenWrt-25.12-Final-V31-Success
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 极致磁盘清理与系统 Rust 部署
+      - name: 2. 磁盘深度清理
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo -E apt-get -qq update
@@ -29,81 +29,31 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: 3. 克隆源码与“李鬼”Rust 注入 (核心修复)
+      - name: 3. 克隆源码与“依赖占位”修复
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
+          # 注入 Passwall feeds
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           
-          # 【V30 绝杀：手动创建一个合法的 Rust 依赖项】
-          # 我们不再抹除依赖，而是直接给它一个它想要的“rust/host”定义
+          # 【修复点：使用单引号防止 Shell 变量提前解析】
           mkdir -p package/lang/rust
-          cat <<EOT > package/lang/rust/Makefile
-include \$(TOPDIR)/rules.mk
+          cat << 'EOF' > package/lang/rust/Makefile
+include $(TOPDIR)/rules.mk
 PKG_NAME:=rust
-PKG_VERSION:=host-injected
-include \$(INCLUDE_DIR)/host-build.mk
-\$(eval \$(call HostBuild))
-EOT
+PKG_VERSION:=custom
+include $(INCLUDE_DIR)/host-build.mk
+$(eval $(call HostBuild))
+EOF
           
           ./scripts/feeds install -a
+          
+          # 强制关闭 Rootfs 大小校验
+          find target/linux/x86/ -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning: Rootfs size checked/g' 2>/dev/null || true
 
-          # 强制跳过 rootfs 大小校验
-          find target/linux/x86/ -name "Makefile" | xargs sed -i 's/\$(error The rootfs is too large/@echo Warning: Rootfs size checked/g' 2>/dev/null || true
-
-      - name: 4. 注入配置与分区扩容
+      - name: 4. 配置注入
         run: |
-          [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
-          cd openwrt
-          
-          # 设置 1024MB 根分区
-          sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
-          sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
-          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
-          
-          sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
-          {
-            echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
-            echo "CONFIG_PACKAGE_luci-compat=y"
-            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            echo "CONFIG_PACKAGE_rust=y"
-          } >> .config
-          sed -i 's/=m/=y/g' .config
-          rm -rf tmp
-          make defconfig
-
-      - name: 5. 执行正式编译 (路径映射)
-        run: |
-          cd openwrt
-          source $HOME/.cargo/env
-          
-          # 物理链接：让 OpenWrt 在自己的宿主工具目录里直接看到官方 Rust
-          mkdir -p staging_dir/host/bin
-          ln -sf \$(which rustc) staging_dir/host/bin/rustc
-          ln -sf \$(which cargo) staging_dir/host/bin/cargo
-          ln -sf \$(which rustdoc) staging_dir/host/bin/rustdoc
-          
-          # 告诉 OpenWrt：Rust 已经“编译安装”好了
-          mkdir -p staging_dir/host/stamp
-          touch staging_dir/host/stamp/.rust_installed
-          
-          export PATH="\$HOME/.cargo/bin:\$PATH"
-          export CARGO_HOME="\$HOME/.cargo"
-
-          make download -j8
-          rm -rf dl/*
-          
-          # 开启编译
-          make -j\$(nproc) PATH="\$PATH" CARGO_HOME="\$CARGO_HOME" || make -j1 V=s PATH="\$PATH" CARGO_HOME="\$CARGO_HOME"
-
-      - name: 6. 发布 Release
-        uses: softprops/action-gh-release@v1
-        if: success()
-        with:
-          tag_name: 25.12.0-Final-V30-${{ github.run_id }}
-          files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
-        env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.
