@@ -1,4 +1,4 @@
-name: OpenWrt-V77
+name: OpenWrt-V78
 
 on:
   workflow_dispatch:
@@ -22,16 +22,12 @@ jobs:
 
       - name: 2. 极致磁盘清理与环境补全
         run: |
-          # 彻底腾挪空间：删除大型预装环境
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo rm -rf /usr/lib/google-cloud-sdk /usr/local/lib/node_modules /usr/local/bin/aliyun /usr/local/bin/az /usr/local/bin/kubectl
           docker rmi $(docker images -q) || true
           sudo apt-get clean
-          
-          # 安装核心组件
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev help2man texinfo libpam0g-dev golang-go
-          
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
@@ -45,7 +41,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 深度修复与配置注入
+      - name: 4. 深度修复与翻译补丁注入
         run: |
           cd openwrt
           # 1. 屏蔽分区限制
@@ -55,10 +51,19 @@ jobs:
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 全局兼容性标志
+          # 3. 全局兼容性标志 (含修复 setpwent)
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=redundant-decls -D_GNU_SOURCE -include pwd.h -include grp.h /' include/target.mk
           
-          # 4. 配置注入
+          # 4. 【V78 核心】：修复 Passwall 翻译文件路径错误
+          # 强行创建中文翻译目录并链接现有翻译，防止 Makefile 找不到 Target
+          if [ -d package/feeds/passwall/luci-app-passwall ]; then
+            cd package/feeds/passwall/luci-app-passwall/po
+            [ -d zh_Hans ] && ln -s zh_Hans zh-cn 2>/dev/null || true
+            [ -d zh-cn ] && ln -s zh-cn zh_Hans 2>/dev/null || true
+            cd -
+          fi
+
+          # 5. 配置注入
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -77,15 +82,13 @@ jobs:
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           make download -j8 || true
-          
-          # 分阶段编译
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
           # 实时消杀 util-linux 冲突
           find build_dir/ -name "common.c" | xargs sed -i '/program_invocation_name/d' 2>/dev/null || true
           
-          # 最终全量编译 (不再设置 V=s 除非失败，以减少日志占用的隐形空间)
+          # 最终编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
