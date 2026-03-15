@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V11-PerfectLink
+name: OpenWrt-25.12-Final-V12-UltraFix
 
 on:
   workflow_dispatch:
@@ -26,12 +26,12 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方最新版 Rust，版本必 > 1.80，满足所有插件需求
+          # 安装官方 Rust (确保版本 > 1.80)
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与“狸猫换太子”
+      - name: 3. 克隆源码与“外科手术”劫持
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
@@ -40,23 +40,25 @@ jobs:
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-          # 【核心黑科技：建立软链接并劫持逻辑】
+
+          # 【关键修正：劫持而不破坏】
+          # 我们不再重写整个 Makefile，而是只把“编译”和“安装”命令替换成 echo
+          RUST_MAKEFILE=feeds/packages/lang/rust/Makefile
+          if [ -f "$RUST_MAKEFILE" ]; then
+            echo "正在进行 Rust 编译链劫持..."
+            # 屏蔽掉所有调用 python3 x.py 的地方，改为 echo 成功
+            sed -i 's/python3 .\/x.py/echo "Fake build success"/g' $RUST_MAKEFILE
+            # 屏蔽掉安装步骤，防止它覆盖我们手动做的软链接
+            sed -i 's/$(INSTALL_BIN)/# $(INSTALL_BIN)/g' $RUST_MAKEFILE
+          fi
+
+          # 手动提前准备好 host 路径下的二进制文件
           source $HOME/.cargo/env
-          # 创建 OpenWrt 预期的 host 工具目录
           mkdir -p staging_dir/host/bin
-          # 将系统已有的最新 rust 链接过去
           ln -sf $(which rustc) staging_dir/host/bin/rustc
           ln -sf $(which cargo) staging_dir/host/bin/cargo
           ln -sf $(which rustdoc) staging_dir/host/bin/rustdoc
-          
-          # 彻底改写 Rust 目录下的 Makefile，让它变为空操作
-          RUST_DIR=feeds/packages/lang/rust
-          if [ -d "$RUST_DIR" ]; then
-            echo "劫持 Rust 编译脚本..."
-            echo -e "all: \n\t@echo 'Rust is linked by V11'\ninstall: \n\t@echo 'Rust is linked by V11'\ncompile: \n\t@echo 'Rust is linked by V11'" > $RUST_DIR/Makefile
-          fi
-          
+
           ./scripts/feeds install luci-compat luci-lua-runtime
 
       - name: 4. 注入配置
@@ -78,14 +80,14 @@ jobs:
           cd openwrt
           source $HOME/.cargo/env
           ulimit -n 65535
-          # 开启全量编译，现在 Rust 的 host 编译阶段会瞬间“伪装”完成
+          # 现在的逻辑：OpenWrt 会认为自己在编 Rust，但其实只是执行了几个 echo，然后直接去 staging_dir 拿我们准备好的软链接
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V11-Final
+          tag_name: 25.12.0-V12-Ultra
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
