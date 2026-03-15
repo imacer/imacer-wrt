@@ -1,4 +1,4 @@
-name: OpenWrt-V70
+name: OpenWrt-V71
 
 on:
   workflow_dispatch:
@@ -45,14 +45,18 @@ jobs:
           # 1. 物理屏蔽分区限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. Lua 物理补丁
+          # 2. Lua 物理补丁 (稳定版)
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
           # 3. GCC 14 全局容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 4. 全局 Makefile 拦截 (SSR/Trojan-plus)
+          # 4. 【V71 核心修复】：双重拦截逻辑
+          # 拦截 1: 处理 setpwent 缺失 (SSR/Trojan)
+          # 拦截 2: 处理 util-linux 变量冲突
+          # 我们把它们都塞进 package/Makefile 的编译钩子里，确保 100% 触发且不依赖特定目录是否存在
+          sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" -o -name "*.h" | xargs sed -i "s/extern char \\*program_invocation_name;//g; s/extern char \\*program_invocation_short_name;//g" 2>/dev/null || true' package/Makefile
           sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" | xargs grep -l "setpwent" | xargs sed -i "1i #include <pwd.h>\\n#include <grp.h>" 2>/dev/null || true' package/Makefile
 
           # 5. 配置注入 (剔除 brook)
@@ -69,22 +73,18 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 编译执行 (精准消杀版)
+      - name: 5. 编译执行
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
           make download -j8 || true
           
-          # 建立工具链基础
+          # 分阶段稳健编译
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 【V70 修正点】：精准定位消杀范围，避开 host 目录，消除 Permission denied 报错
-          # 只扫描目标架构的 build 目录
-          find build_dir/target-x86_64_musl/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
-          
-          # 最终全量编译
+          # 最终编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
