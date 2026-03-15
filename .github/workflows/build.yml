@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V15-PathRedirect
+name: OpenWrt-25.12-Final-V16-GhostRust
 
 on:
   workflow_dispatch:
@@ -28,9 +28,10 @@ jobs:
           
           # 安装官方 Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与“移除”Rust 编译负担
+      - name: 3. 克隆源码与“依赖抹除”
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
@@ -40,9 +41,10 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 【V15 关键点：不再修改 Makefile，也不再造假文件】
-          # 我们直接通过修改 .config，让系统认为 rust 不需要从 host 编译
-          # 稍后我们在第 5 步通过路径重定向解决插件的编译问题
+          # 【V16 核心必杀：抹除所有对 rust/host 的构建依赖】
+          # 让 shadowsocks-rust, shadow-tls 等包不再去触发 rust 的编译
+          find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g'
+          find package/feeds/ -name "Makefile" | xargs sed -i 's/+rust//g'
           
           ./scripts/feeds install luci-compat luci-lua-runtime
 
@@ -55,38 +57,30 @@ jobs:
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            # 显式禁止编译 Rust host 工具，避开 Makefile 的 target 检查
-            echo "CONFIG_PACKAGE_rust=n"
           } >> .config
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
 
-      - name: 5. 执行正式编译 (全局劫持)
+      - name: 5. 执行正式编译
         run: |
           cd openwrt
           source $HOME/.cargo/env
           
-          # 创建一个全局的软链接，确保无论哪个 Makefile 找 rustc，都能找到我们装好的版本
+          # 依然在系统路径建立链接，确保插件编译时能找到系统 rust
           mkdir -p staging_dir/host/bin
           ln -sf $(which rustc) staging_dir/host/bin/rustc
           ln -sf $(which cargo) staging_dir/host/bin/cargo
           
-          # 【V15 必杀技】：欺骗 make，告诉它 rust/host 已经编译过了
-          # 我们创建一个空的标记文件在 stamp 目录，这样 make world 就会跳过 rust 编译
-          mkdir -p staging_dir/host/stamp
-          touch staging_dir/host/stamp/.rust_installed
-          touch staging_dir/host/stamp/.rust_compiled
-
           ulimit -n 65535
-          # 开始全量编译，现在它会认为 Rust 已经编好了，直接去编 Passwall 插件
+          # 开启编译。现在没有包会触发 rust/host，系统会直接去编译具体的插件
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V15-Final
+          tag_name: 25.12.0-V16-Final
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
