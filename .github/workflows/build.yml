@@ -1,4 +1,4 @@
-name: OpenWrt-V51
+name: OpenWrt-V52
 
 on:
   workflow_dispatch:
@@ -31,28 +31,25 @@ jobs:
 
       - name: 3. 源码检出与 Feeds 配置
         run: |
-          # 确保目录干净
           rm -rf openwrt
           git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
-          
           ./scripts/feeds update -a
-          # 弱化 Rust 宿主检查
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install -a
 
-      - name: 4. 深度补丁与配置注入
+      - name: 4. 核心手术与配置注入
         run: |
           cd openwrt
-          # 物理屏蔽分区大小限制
+          # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 针对 GCC 14 全局注入兼容性 flag
+          # 2. 全局注入 GCC 兼容性参数
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -D_GNU_SOURCE /' include/target.mk
           
-          # 注入自定义配置
+          # 3. 配置文件应用
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -64,27 +61,33 @@ jobs:
             echo "CONFIG_PACKAGE_rust=n" 
           } >> .config
           
-          # 修复 mtools 文档编译错误
-          [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
-          
           make defconfig
 
-      - name: 5. 最终编译阶段
+      - name: 5. 下载并强制修复源码冲突
         run: |
-          # 使用通配符确保进入正确的源码目录
-          cd $(pwd)/openwrt 
+          cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
-          # 再次确认 Makefile 存在
-          if [ ! -f "Makefile" ]; then echo "Error: Makefile not found in $(pwd)"; exit 1; fi
-          
+          # 先下载工具源码（可能会报错，报错也继续，因为我们要手动干预）
           make download -j8 || true
           
-          # 正式开启编译，带入宿主 Rust 路径
+          # 【V52 杀手锏：在源码解压后、正式编译前，暴力切除冲突代码】
+          # 我们直接修改 package Makefile，让它在解压后自动跑一遍 sed 修复
+          find package/utils/util-linux -name "Makefile" | xargs sed -i '/PKG_SOURCE_URL:=/a EXTRA_CFLAGS += -fcommon -Dprogram_invocation_name=prg_inv_name' 2>/dev/null || true
+          
+          # 针对已经可能解压的目录进行一次性清理
+          find build_dir/ -name "c.h" | xargs sed -i 's/extern char \*program_invocation_name;/\/\/removed/g' 2>/dev/null || true
+
+      - name: 6. 正式编译执行
+        run: |
+          cd openwrt
+          [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+          
+          # 开启全核心编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
-      - name: 6. 发布固件
+      - name: 7. 发布固件
         uses: softprops/action-gh-release@v2
         if: success()
         with:
