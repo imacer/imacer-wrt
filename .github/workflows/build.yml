@@ -1,4 +1,4 @@
-name: OpenWrt-V78
+name: OpenWrt-V80
 
 on:
   workflow_dispatch:
@@ -41,29 +41,20 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 深度修复与翻译补丁注入
+      - name: 4. 深度修复与环境注入
         run: |
           cd openwrt
-          # 1. 屏蔽分区限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
-          
-          # 2. Lua 物理补丁
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
-
-          # 3. 全局兼容性标志 (含修复 setpwent)
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=redundant-decls -D_GNU_SOURCE -include pwd.h -include grp.h /' include/target.mk
           
-          # 4. 【V78 核心】：修复 Passwall 翻译文件路径错误
-          # 强行创建中文翻译目录并链接现有翻译，防止 Makefile 找不到 Target
+          # 修复 Passwall 翻译
           if [ -d package/feeds/passwall/luci-app-passwall ]; then
-            cd package/feeds/passwall/luci-app-passwall/po
-            [ -d zh_Hans ] && ln -s zh_Hans zh-cn 2>/dev/null || true
-            [ -d zh-cn ] && ln -s zh-cn zh_Hans 2>/dev/null || true
-            cd -
+            mkdir -p package/feeds/passwall/luci-app-passwall/po/zh-cn
+            cp package/feeds/passwall/luci-app-passwall/po/zh_Hans/*.po package/feeds/passwall/luci-app-passwall/po/zh-cn/ 2>/dev/null || true
           fi
 
-          # 5. 配置注入
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -84,19 +75,17 @@ jobs:
           make download -j8 || true
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
-          
-          # 实时消杀 util-linux 冲突
           find build_dir/ -name "common.c" | xargs sed -i '/program_invocation_name/d' 2>/dev/null || true
-          
-          # 最终编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
-      - name: 6. 发布
+      - name: 6. 整理并发布
         uses: softprops/action-gh-release@v2
         if: success()
         with:
           tag_name: v25.12-Final-${{ github.run_id }}
-          files: openwrt/bin/targets/x86/64/*combined-efi.img*
+          # 直接使用通配符捕获所有生成的文件，不限制特定关键词
+          files: |
+            openwrt/bin/targets/x86/64/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
