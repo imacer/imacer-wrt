@@ -1,4 +1,4 @@
-name: OpenWrt-V76
+name: OpenWrt-V77
 
 on:
   workflow_dispatch:
@@ -20,9 +20,15 @@ jobs:
       - name: 1. Checkout
         uses: actions/checkout@v4
 
-      - name: 2. 系统环境极致补全
+      - name: 2. 极致磁盘清理与环境补全
         run: |
+          # 彻底腾挪空间：删除大型预装环境
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
+          sudo rm -rf /usr/lib/google-cloud-sdk /usr/local/lib/node_modules /usr/local/bin/aliyun /usr/local/bin/az /usr/local/bin/kubectl
+          docker rmi $(docker images -q) || true
+          sudo apt-get clean
+          
+          # 安装核心组件
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev help2man texinfo libpam0g-dev golang-go
           
@@ -42,23 +48,17 @@ jobs:
       - name: 4. 深度修复与配置注入
         run: |
           cd openwrt
-          # 1. 物理屏蔽分区限制
+          # 1. 屏蔽分区限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
           # 2. Lua 物理补丁
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 【V76 核心修复】：全局 CFLAGS 强制压制
-          # 使用 -include 修复 setpwent (SSR/Trojan/MbedTLS)
-          # 使用 -Wno-error=redundant-decls 处理 util-linux 变量冲突，这是最安全的做法
+          # 3. 全局兼容性标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=redundant-decls -D_GNU_SOURCE -include pwd.h -include grp.h /' include/target.mk
           
-          # 4. 物理移除引发冲突的特定声明 (不再动 Makefile 内部)
-          # 在编译前，全局搜寻并删除引起 GCC 14 冲突的变量声明
-          # 这种方式在源码解压到 build_dir 之前设置好，利用 OpenWrt 的 patch 机制或后续的实时消杀
-          
-          # 5. 配置注入 (剔除 brook)
+          # 4. 配置注入
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -72,19 +72,20 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 编译执行 (含实时消杀)
+      - name: 5. 编译执行
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           make download -j8 || true
           
+          # 分阶段编译
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 【V76 实时消杀】：在编译 package 之前，再次暴力清理 build_dir
-          # 此时源码已解压，且不在 Makefile 内部运行，不存在缩进问题
+          # 实时消杀 util-linux 冲突
           find build_dir/ -name "common.c" | xargs sed -i '/program_invocation_name/d' 2>/dev/null || true
           
+          # 最终全量编译 (不再设置 V=s 除非失败，以减少日志占用的隐形空间)
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
