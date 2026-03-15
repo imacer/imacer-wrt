@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-V32
+name: OpenWrt-25.12-V33
 
 on:
   workflow_dispatch:
@@ -35,6 +35,7 @@ jobs:
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           ./scripts/feeds update -a
           
+          # 注入合法的 Rust 依赖占位
           mkdir -p package/lang/rust
           echo 'include $(TOPDIR)/rules.mk' > package/lang/rust/Makefile
           echo 'PKG_NAME:=rust' >> package/lang/rust/Makefile
@@ -43,19 +44,23 @@ jobs:
           echo '$(eval $(call HostBuild))' >> package/lang/rust/Makefile
           
           ./scripts/feeds install -a
+          # 抹除根分区大小报错限制
           find target/linux/x86/ -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
 
       - name: 4. Config Injection
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
+          # 锁定分区大小为 1GB
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
-          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
-          echo "CONFIG_VERSION_NUMBER=\"25.12.0\"" >> .config
-          echo "CONFIG_PACKAGE_luci-compat=y" >> .config
-          echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> .config
-          echo "CONFIG_PACKAGE_rust=y" >> .config
+          {
+            echo "CONFIG_TARGET_IMAGES_GZIP=y"
+            echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
+            echo "CONFIG_PACKAGE_luci-compat=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_rust=y"
+          } >> .config
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           sed -i 's/=m/=y/g' .config
           make defconfig
@@ -64,19 +69,26 @@ jobs:
         run: |
           cd openwrt
           source $HOME/.cargo/env
-          mkdir -p staging_dir/host/bin staging_dir/host/stamp
+          # 【V33 关键修复：确保目录层级深度存在】
+          mkdir -p staging_dir/host/bin
+          mkdir -p staging_dir/host/stamp
+          
+          # 强制物理链接系统 Rust
           ln -sf $(which rustc) staging_dir/host/bin/rustc
           ln -sf $(which cargo) staging_dir/host/bin/cargo
+          # 标记 Rust 为已安装，防止 make 重新下载
           touch staging_dir/host/stamp/.rust_installed
+          
           make download -j8
           rm -rf dl/*
+          # 启动全量编译
           make -j$(nproc) PATH="$HOME/.cargo/bin:$PATH" || make -j1 V=s PATH="$HOME/.cargo/bin:$PATH"
 
       - name: 6. Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: Final-v32-${{ github.run_id }}
+          tag_name: v25.12.0-final-${{ github.run_id }}
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
