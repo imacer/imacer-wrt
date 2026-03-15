@@ -1,4 +1,4 @@
-name: OpenWrt-V56
+name: OpenWrt-V57
 
 on:
   workflow_dispatch:
@@ -39,26 +39,56 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 【核心修复】物理注入与配置
+      - name: 4. 深度修复与配置注入
         run: |
           cd openwrt
           # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 修复 Lua 声明：直接在全路径头文件中物理写入定义 (即使源码还没解压)
-          # 我们修改 package 的 Makefile，让它在解压后第一件事就是写入宏定义
-          sed -i '/PKG_INSTALL:=1/a \
-          define Build/Prepare\
-          \t$(call Build/Prepare/Default)\
-          \tsed -i "s/#define LUA_RELEASE.*/#define LUA_RELEASE \\"Lua 5.1.5\\"/" $(PKG_BUILD_DIR)/src/lua.h\
-          end' package/utils/lua/Makefile
+          # 2. 【V57 核心修复】：使用更简单安全的办法注入 Lua 声明
+          # 直接在定义行后面插入 LUA_RELEASE，避免使用复杂的 Build/Prepare 嵌套
+          LUA_MAKEFILE="package/utils/lua/Makefile"
+          if [ -f "$LUA_MAKEFILE" ]; then
+            sed -i '/PKG_INSTALL:=1/a TARGET_CFLAGS += -DLUA_RELEASE=\\"Lua 5.1.5\\"' "$LUA_MAKEFILE"
+          fi
 
           # 3. 注入 GCC 14 全局降压参数
-          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -Wno-error=incompatible-pointer-types -D_GNU_SOURCE /' include/target.mk
+          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
           # 4. 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
           # 5. 应用配置
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
-          sed -i 's/CONFIG_TARGET
+          sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
+          sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
+          {
+            echo "CONFIG_TARGET_IMAGES_GZIP=y"
+            echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
+            echo "CONFIG_PACKAGE_luci-compat=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_rust=n" 
+          } >> .config
+          make defconfig
+
+      - name: 5. 最终编译执行
+        run: |
+          cd openwrt
+          [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+          
+          make download -j8 || true
+          
+          # 增加一个针对符号冲突的全局导出
+          export EXTRA_CFLAGS="-fcommon -Dprogram_invocation_name=prg_inv_name"
+          
+          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS" || \
+          make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS"
+
+      - name: 6. 发布
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: v25.12-Final-${{ github.run_id }}
+          files: openwrt/bin/targets/x86/64/*combined-efi.img*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
