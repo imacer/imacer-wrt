@@ -1,4 +1,4 @@
-name: OpenWrt-V66
+name: OpenWrt-V67
 
 on:
   workflow_dispatch:
@@ -45,17 +45,22 @@ jobs:
           # 1. 物理屏蔽分区限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. Lua 物理补丁 (已验证有效)
+          # 2. Lua 物理补丁
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 针对 GCC 14 全局注入安全标志
+          # 3. 针对 GCC 14 的全局容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 4. 修复 mtools
+          # 4. 【V67 核心修复】：精准拦截 passwall 及其依赖包的头文件缺失
+          # 我们直接在全局的包编译规则中增加一个通用补丁：只要源码包含 setpwent，就注入头文件
+          # 这样可以一次性解决 SSR、Trojan-plus 以及后续可能出现的类似问题
+          sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" | xargs grep -l "setpwent" | xargs sed -i "1i #include <pwd.h>\\n#include <grp.h>" 2>/dev/null || true' package/Makefile
+
+          # 5. 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
-          # 5. 配置注入
+          # 6. 配置注入
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -68,7 +73,7 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 编译与“实时消杀”执行
+      - name: 5. 编译执行
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -79,15 +84,10 @@ jobs:
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 【V66 杀手锏】：修复 shadowsocksr-libev 的函数隐式声明报错
-          # 在编译 package 之前，强行扫描源码，为缺失头文件的文件补上 #include <pwd.h> 和 #include <grp.h>
-          find build_dir/ -name "*.c" | xargs grep -l "setpwent" | xargs sed -i '1i #include <pwd.h>\n#include <grp.h>' 2>/dev/null || true
-          
-          # 同时保留之前的 util-linux 冲突消杀
+          # 【消杀环节】：处理 util-linux 冲突
           find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
-          find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_short_name;//g' 2>/dev/null || true
           
-          # 最终全量编译
+          # 最终编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
