@@ -1,4 +1,4 @@
-name: OpenWrt-V53
+name: OpenWrt-V54
 
 on:
   workflow_dispatch:
@@ -34,25 +34,25 @@ jobs:
           rm -rf openwrt
           git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 使用更稳定的源
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
-          
           ./scripts/feeds update -a
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install -a
 
-      - name: 4. 配置注入与“强制补丁手术”
+      - name: 4. 配置注入与“环境降压补丁”
         run: |
           cd openwrt
           # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 全局注入 GCC 14 兼容性参数
-          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -D_GNU_SOURCE /' include/target.mk
+          # 2. 【V54 核心】：全局注入“后悔药”标志，解决 GCC 14 的语法强制要求
+          # -fcommon: 允许重复定义变量
+          # -Wno-error=incompatible-pointer-types: 允许指针类型不匹配（修复 libubox）
+          # -Wno-error=implicit-function-declaration: 允许隐式函数声明
+          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 3. 【V53 核心修复】：预修复 Lua 源码报错
-          # 在编译前强制在 lua.h 中注入版本号定义，防止 LUA_RELEASE 报错
+          # 3. 注入 Lua 版本补丁
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-fix-release-macro.patch
 
@@ -73,17 +73,18 @@ jobs:
           
           make defconfig
 
-      - name: 5. 编译执行 (含网络重试)
+      - name: 5. 编译执行 (注入全局环境变量)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+          export PATH="$HOME/.cargo/bin:$PATH"
           
-          # 尝试多次下载，防止 403 导致缺件
-          make download -j8 || make download -j1 V=s || true
+          make download -j8 || true
           
-          # 正式开启编译
-          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
-          make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
+          # 正式编译：在命令行再次强调禁用指针检查错误
+          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) \
+            EXTRA_CFLAGS="-Wno-error=incompatible-pointer-types" || \
+          make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="-Wno-error=incompatible-pointer-types"
 
       - name: 6. 发布固件
         uses: softprops/action-gh-release@v2
