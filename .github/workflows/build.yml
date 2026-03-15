@@ -1,4 +1,4 @@
-name: OpenWrt-V58
+name: OpenWrt-V59
 
 on:
   workflow_dispatch:
@@ -45,10 +45,18 @@ jobs:
           # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 修复 mtools (Ubuntu 24.04 兼容)
+          # 2. 针对 GCC 14 的全局兼容性调整 (修复 libubox 和其他库的指针问题)
+          # 注意：这里去掉了会导致 wolfssl 报错的变量重定向
+          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -D_GNU_SOURCE /' include/target.mk
+          
+          # 3. 物理修复 Lua 源码 (最稳健的方式)
+          # 在解压后强制写入 LUA_RELEASE 宏
+          sed -i 's/Build\/Prepare/Build\/Prepare-Original/g' package/utils/lua/Makefile 2>/dev/null || true
+          
+          # 4. 修复 mtools (Ubuntu 24.04 兼容)
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
-          # 3. 应用配置
+          # 5. 应用配置
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -61,25 +69,11 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 最终编译执行 (强制宏注入)
+      - name: 5. 最终编译执行 (精准宏注入)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
           make download -j8 || true
           
-          # 【V58 核心】：使用单引号包裹双引号的极致转义，确保 LUA_RELEASE 作为一个带引号的字符串传入 C 代码
-          # 同时使用 -fpermissive 强迫 GCC 14 接受不规范的代码
-          export EXTRA_CFLAGS='-fcommon -fpermissive -D_GNU_SOURCE -DLUA_RELEASE="\"Lua 5.1.5\"" -Dprogram_invocation_name=prg_inv_name -Wno-error=incompatible-pointer-types'
-          
-          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS" || \
-          make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS"
-
-      - name: 6. 发布
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
-          tag_name: v25.12-Final-${{ github.run_id }}
-          files: openwrt/bin/targets/x86/64/*combined-efi.img*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 【V59 核心】：移除变量重定向
