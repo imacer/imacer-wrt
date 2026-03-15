@@ -26,7 +26,7 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方最新版 Rust (1.80+), 确保 shadowsocks-rust 等插件版本需求
+          # 安装官方最新版 Rust，版本必 > 1.80，满足所有插件需求
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
@@ -41,19 +41,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 【核心修复：手动创建软链接，绕过源码编译】
-          # 我们把系统里刚装好的最新 rustc/cargo 链接到 OpenWrt 的构建目录下
+          # 【核心黑科技：建立软链接并劫持逻辑】
           source $HOME/.cargo/env
-          STAGING_HOST_BIN=$(pwd)/staging_dir/host/bin
-          mkdir -p $STAGING_HOST_BIN
-          ln -sf $(which rustc) $STAGING_HOST_BIN/rustc
-          ln -sf $(which cargo) $STAGING_HOST_BIN/cargo
-          ln -sf $(which rustdoc) $STAGING_HOST_BIN/rustdoc
+          # 创建 OpenWrt 预期的 host 工具目录
+          mkdir -p staging_dir/host/bin
+          # 将系统已有的最新 rust 链接过去
+          ln -sf $(which rustc) staging_dir/host/bin/rustc
+          ln -sf $(which cargo) staging_dir/host/bin/cargo
+          ln -sf $(which rustdoc) staging_dir/host/bin/rustdoc
           
-          # 彻底改写 Rust 的 Makefile，让它变为空操作，防止它去跑那个会 Panic 的脚本
+          # 彻底改写 Rust 目录下的 Makefile，让它变为空操作
           RUST_DIR=feeds/packages/lang/rust
           if [ -d "$RUST_DIR" ]; then
-            echo "劫持 Rust 编译逻辑..."
+            echo "劫持 Rust 编译脚本..."
             echo -e "all: \n\t@echo 'Rust is linked by V11'\ninstall: \n\t@echo 'Rust is linked by V11'\ncompile: \n\t@echo 'Rust is linked by V11'" > $RUST_DIR/Makefile
           fi
           
@@ -78,14 +78,14 @@ jobs:
           cd openwrt
           source $HOME/.cargo/env
           ulimit -n 65535
-          # 此时编译系统会直接通过软链接使用 1.85+ 的 Rust，完美通关
+          # 开启全量编译，现在 Rust 的 host 编译阶段会瞬间“伪装”完成
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V11-Fixed
+          tag_name: 25.12.0-V11-Final
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
