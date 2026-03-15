@@ -1,4 +1,4 @@
-name: OpenWrt-V62
+name: OpenWrt-V63
 
 on:
   workflow_dispatch:
@@ -49,13 +49,21 @@ jobs:
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 针对 GCC 14 全局注入
+          # 3. 【V63 核心修复】：物理抹除 util-linux 的冲突声明
+          # 我们在编译开始前，直接修改 util-linux 的 Makefile，让它在解压后自动注释掉报错行
+          UTIL_LINUX_MK="package/utils/util-linux/Makefile"
+          if [ -f "$UTIL_LINUX_MK" ]; then
+            sed -i '/Build\/Prepare/a \
+          \tfind $(PKG_BUILD_DIR) -name "*.h" -o -name "*.c" | xargs sed -i "s/extern char \*program_invocation_name;//g" 2>/dev/null || true' "$UTIL_LINUX_MK"
+          fi
+
+          # 4. 针对 GCC 14 全局注入容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 4. 修复 mtools
+          # 5. 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
-          # 5. 配置
+          # 6. 配置注入
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -73,11 +81,13 @@ jobs:
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
-          # 先单独编译核心工具包，减少并发冲突
+          make download -j8 || true
+          
+          # 先单独编译核心工具包
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 最终全量编译，如果失败则切换到单线程打印详细日志
+          # 最终全量编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
