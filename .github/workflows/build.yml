@@ -1,4 +1,4 @@
-name: OpenWrt-V68
+name: OpenWrt-V69
 
 on:
   workflow_dispatch:
@@ -37,14 +37,9 @@ jobs:
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
           ./scripts/feeds update -a
-          
-          # 【V68 核心】：在安装前强制升级 Go 语言包版本定义
-          # 这会欺骗 Brook，让它使用更高版本的 Go 编译规则
-          find feeds/packages/lang/golang -name "Makefile" | xargs sed -i 's/GO_VERSION:=.*/GO_VERSION:=1.23.1/g' 2>/dev/null || true
-          
           ./scripts/feeds install -a
 
-      - name: 4. 深度修复与配置注入
+      - name: 4. 深度修复与配置极致精简
         run: |
           cd openwrt
           # 1. 物理屏蔽分区限制
@@ -54,16 +49,13 @@ jobs:
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 针对 GCC 14 的全局容错标志
+          # 3. GCC 14 全局容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
           # 4. 全局 Makefile 拦截：修复 C 函数声明缺失 (SSR/Trojan-plus)
           sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" | xargs grep -l "setpwent" | xargs sed -i "1i #include <pwd.h>\\n#include <grp.h>" 2>/dev/null || true' package/Makefile
 
-          # 5. 修复 mtools
-          [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
-
-          # 6. 配置注入
+          # 5. 配置注入与“剔除报错组件”
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -72,7 +64,9 @@ jobs:
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            echo "CONFIG_PACKAGE_rust=n" 
+            echo "CONFIG_PACKAGE_rust=n"
+            # 物理剔除引发 Go 错误的 brook
+            echo "CONFIG_PACKAGE_brook=n"
           } >> .config
           make defconfig
 
@@ -87,10 +81,10 @@ jobs:
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 消杀环节
+          # 消杀环节 (util-linux 冲突)
           find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
           
-          # 最终编译
+          # 最终全量编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
