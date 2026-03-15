@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V8-RustFix
+name: OpenWrt-25.12-Final-V10-FinalFix
 
 on:
   workflow_dispatch:
@@ -26,14 +26,13 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 【核心变动：安装官方最新 Rust 环境】
+          # 关键：通过官方脚本安装最新 Rust (1.80+), 确保 shadowsocks-rust 能用
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          source $HOME/.cargo/env
           
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与删除冲突目录
+      - name: 3. 克隆源码与“劫持”Rust 脚本
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
@@ -43,8 +42,17 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 依然删除源码里那个会 Panic 的 Rust 目录，强制使用我们刚才装好的官方 Rust
-          rm -rf feeds/packages/lang/rust
+          # 【核心黑科技：保留目录但劫持编译】
+          RUST_DIR=feeds/packages/lang/rust
+          if [ -d "$RUST_DIR" ]; then
+            # 1. 强行修改 Makefile，将原本要执行编译的 python3 x.py 命令全部注释掉
+            # 这样执行 make package/rust/host/compile 时会瞬间完成，且不报错
+            sed -i 's/python3 .\/x.py/# python3 .\/x.py/g' $RUST_DIR/Makefile
+            
+            # 2. 伪造一个编译完成的标记文件，防止它重新触发编译逻辑
+            mkdir -p build_dir/host/rustc-1.90.0-src
+            touch build_dir/host/rustc-1.90.0-src/.built
+          fi
           
           ./scripts/feeds install luci-compat luci-lua-runtime
 
@@ -67,16 +75,17 @@ jobs:
       - name: 5. 执行正式编译
         run: |
           cd openwrt
-          # 确保环境变量生效
+          # 激活刚才安装的官方 Rust 环境
           source $HOME/.cargo/env
           ulimit -n 65535
+          # 开始全量编译
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V8-Final
+          tag_name: 25.12.0-Final-V10
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
