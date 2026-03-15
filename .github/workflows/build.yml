@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V16-GhostRust
+name: OpenWrt-25.12-Final-Ultra
 
 on:
   workflow_dispatch:
@@ -20,67 +20,80 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 准备编译环境 (注入官方 Rust)
+      - name: 2. 准备编译环境 (注入官方最新 Rust)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方 Rust
+          # 安装官方 Rust 编译器 (满足 Shadowsocks-Rust 等 1.80+ 的版本要求)
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与“依赖抹除”
+      - name: 3. 克隆源码与“依赖抹除”黑科技
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
+          # 注入 Passwall 插件源
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 【V16 核心必杀：抹除所有对 rust/host 的构建依赖】
-          # 让 shadowsocks-rust, shadow-tls 等包不再去触发 rust 的编译
-          find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g'
-          find package/feeds/ -name "Makefile" | xargs sed -i 's/+rust//g'
+          # 【核心修复：抹除对 rust/host 的构建依赖】
+          # 强制让所有插件不再去触发 OpenWrt 源码里那个会报错的 Rust 编译任务
+          find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
+          find package/feeds/ -name "Makefile" | xargs sed -i 's/+rust//g' 2>/dev/null || true
           
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置
+      - name: 4. 注入配置与预处理
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
+          # 强制指定版本号
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            # 彻底禁用源码包中的 rust 编译，防止干扰
+            echo "CONFIG_PACKAGE_rust=n"
           } >> .config
+          
+          # 转换所有模块为集成模式
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
 
-      - name: 5. 执行正式编译
+      - name: 5. 执行正式编译 (路径强力注入版)
         run: |
           cd openwrt
+          # 激活刚才安装的官方 Rust
           source $HOME/.cargo/env
           
-          # 依然在系统路径建立链接，确保插件编译时能找到系统 rust
+          # 【最后防线：物理拷贝编译器到 OpenWrt 内部路径】
+          # 确保 fclones, shadowsocks-rust 等工具能直接抓到编译器
           mkdir -p staging_dir/host/bin
-          ln -sf $(which rustc) staging_dir/host/bin/rustc
-          ln -sf $(which cargo) staging_dir/host/bin/cargo
+          cp -af $(which rustc) staging_dir/host/bin/rustc
+          cp -af $(which cargo) staging_dir/host/bin/cargo
+          cp -af $(which rustdoc) staging_dir/host/bin/rustdoc
+          
+          # 透传环境变量，解决所有子进程的路径问题
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export CARGO_HOME="$HOME/.cargo"
           
           ulimit -n 65535
-          # 开启编译。现在没有包会触发 rust/host，系统会直接去编译具体的插件
-          make -j$(nproc) || make -j1 V=s
+          # 开启编译
+          make -j$(nproc) PATH="$PATH" CARGO_HOME="$CARGO_HOME" || make -j1 V=s PATH="$PATH" CARGO_HOME="$CARGO_HOME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V16-Final
+          tag_name: 25.12.0-Final-Stable
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
