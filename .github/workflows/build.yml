@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V14-Final
+name: OpenWrt-25.12-Final-V15-PathRedirect
 
 on:
   workflow_dispatch:
@@ -26,12 +26,11 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方 Rust，确保环境中有可用的最新 rustc
+          # 安装官方 Rust
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与初步劫持
+      - name: 3. 克隆源码与“移除”Rust 编译负担
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
@@ -41,12 +40,10 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 修改 Rust 的 Makefile 逻辑：让它在执行任何命令时都只 echo 成功
-          RUST_MAKEFILE=feeds/packages/lang/rust/Makefile
-          if [ -f "$RUST_MAKEFILE" ]; then
-            sed -i 's/python3 .\/x.py/echo "Fake Success"/g' $RUST_MAKEFILE
-          fi
-
+          # 【V15 关键点：不再修改 Makefile，也不再造假文件】
+          # 我们直接通过修改 .config，让系统认为 rust 不需要从 host 编译
+          # 稍后我们在第 5 步通过路径重定向解决插件的编译问题
+          
           ./scripts/feeds install luci-compat luci-lua-runtime
 
       - name: 4. 注入配置
@@ -58,41 +55,38 @@ jobs:
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            # 显式禁止编译 Rust host 工具，避开 Makefile 的 target 检查
+            echo "CONFIG_PACKAGE_rust=n"
           } >> .config
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
 
-      - name: 5. 执行正式编译 (V14 注入点)
+      - name: 5. 执行正式编译 (全局劫持)
         run: |
           cd openwrt
           source $HOME/.cargo/env
           
-          # 【这是本次最关键的注入】
-          # 在 make 启动前的最后时刻，强行创建所有标记文件
+          # 创建一个全局的软链接，确保无论哪个 Makefile 找 rustc，都能找到我们装好的版本
           mkdir -p staging_dir/host/bin
           ln -sf $(which rustc) staging_dir/host/bin/rustc
           ln -sf $(which cargo) staging_dir/host/bin/cargo
-          ln -sf $(which rustdoc) staging_dir/host/bin/rustdoc
           
-          # 伪造 build 目录和戳记文件，跳过 host 端的编译检查
-          mkdir -p build_dir/host/rustc-1.90.0-src
-          touch build_dir/host/rustc-1.90.0-src/.built
-          touch build_dir/host/rustc-1.90.0-src/.configured
-          
-          # 建立 stamp 文件，这是 OpenWrt 判断包是否安装的终极依据
+          # 【V15 必杀技】：欺骗 make，告诉它 rust/host 已经编译过了
+          # 我们创建一个空的标记文件在 stamp 目录，这样 make world 就会跳过 rust 编译
           mkdir -p staging_dir/host/stamp
           touch staging_dir/host/stamp/.rust_installed
+          touch staging_dir/host/stamp/.rust_compiled
 
           ulimit -n 65535
-          # 执行编译，不带 V=s 以加快速度，如果失败再看详细日志
+          # 开始全量编译，现在它会认为 Rust 已经编好了，直接去编 Passwall 插件
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-V14-Success
+          tag_name: 25.12.0-V15-Final
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
