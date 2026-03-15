@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-Ultra-V19
+name: OpenWrt-25.12-Ultra-V19
 
 on:
   workflow_dispatch:
