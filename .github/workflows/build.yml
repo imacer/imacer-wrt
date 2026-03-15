@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-Ultra
+name: OpenWrt-25.12-Final-Ultra-V19
 
 on:
   workflow_dispatch:
@@ -26,24 +26,37 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
-          # 安装官方 Rust 编译器 (确保版本满足 Shadowsocks-Rust 等 1.80+ 的硬性需求)
+          # 安装官方 Rust 编译器 (满足 1.80+ 的硬性需求)
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           sudo timedatectl set-timezone "$TZ"
 
-      - name: 3. 克隆源码与“依赖抹除”黑科技
+      - name: 3. 克隆源码与“虚无化”Rust 定义
         run: |
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 注入 Passwall 及其依赖包源
+          # 注入插件源
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 【V18 核心必杀：抹除对 rust/host 的构建依赖】
-          # 强制让所有插件不再去触发 OpenWrt 源码里那个会 Panic 的 Rust 编译任务
+          # 【V19 核心杀招：重写 Rust Makefile，彻底切断源码下载逻辑】
+          # 不管 Rust 源码包在哪，我们直接给它一个空壳定义，让它瞬间完成
+          RUST_MAKEFILE=$(find feeds/packages/lang/rust/ -name "Makefile" 2>/dev/null | head -n 1)
+          if [ -f "$RUST_MAKEFILE" ]; then
+            echo "正在对 Rust 进行虚无化改写: $RUST_MAKEFILE"
+            cat <<EOF > "$RUST_MAKEFILE"
+include \$(TOPDIR)/rules.mk
+PKG_NAME:=rust
+PKG_VERSION:=custom
+include \$(INCLUDE_DIR)/host-build.mk
+\$(eval \$(call HostBuild))
+EOF
+          fi
+
+          # 抹除其他潜在的 Rust 依赖字符串，双重保险
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           find package/feeds/ -name "Makefile" | xargs sed -i 's/+rust//g' 2>/dev/null || true
           
@@ -53,17 +66,15 @@ jobs:
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 强制指定版本号，避免 SNAPSHOT 导致插件不兼容
+          # 修正版本号
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
             echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            # 彻底禁用源码包中的 rust 编译，防止冲突
             echo "CONFIG_PACKAGE_rust=n"
           } >> .config
           
-          # 转换所有模块为集成模式 (y)
           sed -i 's/=m/=y/g' .config
           rm -rf tmp
           make defconfig
@@ -71,29 +82,30 @@ jobs:
       - name: 5. 执行正式编译 (全路径强力注入版)
         run: |
           cd openwrt
-          # 激活刚才安装的官方 Rust
           source $HOME/.cargo/env
           
-          # 【最后防线：物理拷贝编译器到 OpenWrt 内部路径】
-          # 确保 fclones, shadowsocks-rust 等工具能直接抓到编译器
+          # 物理拷贝官方编译器到 OpenWrt 内部路径，确保插件能直接调用
           mkdir -p staging_dir/host/bin
           cp -af $(which rustc) staging_dir/host/bin/rustc
           cp -af $(which cargo) staging_dir/host/bin/cargo
           cp -af $(which rustdoc) staging_dir/host/bin/rustdoc
           
-          # 设置并透传环境变量
+          # 伪造 stamp 文件，防止系统尝试重新构建已被虚无化的 Rust
+          mkdir -p staging_dir/host/stamp
+          touch staging_dir/host/stamp/.rust_installed
+          
           export PATH="$HOME/.cargo/bin:$PATH"
           export CARGO_HOME="$HOME/.cargo"
           
           ulimit -n 65535
-          # 开启全量编译
+          # 开启编译
           make -j$(nproc) PATH="$PATH" CARGO_HOME="$CARGO_HOME" || make -j1 V=s PATH="$PATH" CARGO_HOME="$CARGO_HOME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Final-V18
+          tag_name: 25.12.0-Final-V19
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
