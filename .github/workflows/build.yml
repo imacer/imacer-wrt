@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V22-Final
+name: OpenWrt-25.12-Final-V23
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 极致磁盘清理
+      - name: 2. 极致磁盘清理 (V23 增强版)
         run: |
-          # 删除所有不必要的系统组件，释放约 30GB 空间
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm
+          # 删掉一切能删的，确保有 35GB+ 可用空间
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
           
@@ -41,7 +41,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 重写 Rust Makefile
+          # 重写 Rust Makefile (V23 保持虚无化)
           RUST_MAKEFILE=$(find feeds/packages/lang/rust/ -name "Makefile" 2>/dev/null | head -n 1)
           if [ -f "$RUST_MAKEFILE" ]; then
             echo 'include $(TOPDIR)/rules.mk' > "$RUST_MAKEFILE"
@@ -54,14 +54,17 @@ jobs:
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置与分区平衡
+      - name: 4. 注入配置与镜像瘦身
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
           
-          # 修正分区大小：512MB 是最稳健的“大容量”选择
-          sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
-          sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=512/g' .config
+          # 【V23 核心策略：只生成 EFI 联合镜像，不生成其他乱七八糟的格式，节省打包空间】
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=400" >> .config
+          echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
+          echo "# CONFIG_TARGET_ROOTFS_EXT4FS is not set" >> .config
+          echo "# CONFIG_VMDK_IMAGES is not set" >> .config
+          echo "# CONFIG_VHDX_IMAGES is not set" >> .config
           
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
@@ -79,7 +82,6 @@ jobs:
           cd openwrt
           source $HOME/.cargo/env
           
-          # 物理注入 Rust
           mkdir -p staging_dir/host/bin
           cp -af $(which rustc) staging_dir/host/bin/rustc
           cp -af $(which cargo) staging_dir/host/bin/cargo
@@ -89,18 +91,17 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export CARGO_HOME="$HOME/.cargo"
 
-          # 预先下载依赖，然后清理 dl 目录以腾出物理磁盘空间给生成镜像使用
+          # 彻底清理 dl 目录，为最后的镜像制作腾出所有空间
           make download -j8
-          find dl -size -1k -exec rm -f {} \;
+          rm -rf dl/*
           
-          # 开启编译
           make -j$(nproc) PATH="$PATH" CARGO_HOME="$CARGO_HOME" || make -j1 V=s PATH="$PATH" CARGO_HOME="$CARGO_HOME"
 
       - name: 6. 发布 Release
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Final-Stable
+          tag_name: 25.12.0-Final-Master
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
