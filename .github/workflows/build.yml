@@ -1,4 +1,4 @@
-name: OpenWrt-V55
+name: OpenWrt-V56
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       - name: 1. Checkout
         uses: actions/checkout@v4
 
-      - name: 2. 环境部署与磁盘清理
+      - name: 2. 系统环境极致补全
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo apt-get update
@@ -29,67 +29,36 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: 3. 源码检出与 Feeds 锁定
+      - name: 3. 源码检出与 Feeds 同步
         run: |
           rm -rf openwrt
           git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
-          # 仅在 feeds.conf 写入，不改动源码目录
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
-          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 自动化配置注入
+      - name: 4. 【核心修复】物理注入与配置
         run: |
           cd openwrt
-          # 物理屏蔽分区大小限制
+          # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 配置文件应用
-          [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
+          # 2. 修复 Lua 声明：直接在全路径头文件中物理写入定义 (即使源码还没解压)
+          # 我们修改 package 的 Makefile，让它在解压后第一件事就是写入宏定义
+          sed -i '/PKG_INSTALL:=1/a \
+          define Build/Prepare\
+          \t$(call Build/Prepare/Default)\
+          \tsed -i "s/#define LUA_RELEASE.*/#define LUA_RELEASE \\"Lua 5.1.5\\"/" $(PKG_BUILD_DIR)/src/lua.h\
+          end' package/utils/lua/Makefile
+
+          # 3. 注入 GCC 14 全局降压参数
+          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -Wno-error=incompatible-pointer-types -D_GNU_SOURCE /' include/target.mk
           
-          # 强制设置分区大小
-          sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
-          sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
-          {
-            echo "CONFIG_TARGET_IMAGES_GZIP=y"
-            echo "CONFIG_VERSION_NUMBER=\"25.12.0\""
-            echo "CONFIG_PACKAGE_luci-compat=y"
-            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
-            echo "CONFIG_PACKAGE_rust=n" 
-          } >> .config
-          
-          # 修复 mtools
+          # 4. 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
-          
-          make defconfig
 
-      - name: 5. 编译执行 (全量宏注入)
-        run: |
-          cd openwrt
-          [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
-          
-          make download -j8 || true
-          
-          # 【V55 核心】：将所有补丁参数通过环境变量一次性注入
-          # 解决了 Lua 缺失宏、GCC14 指针错误、util-linux 符号冲突
-          export EXTRA_CFLAGS="-fcommon \
-            -Wno-error=incompatible-pointer-types \
-            -Wno-error=implicit-function-declaration \
-            -D_GNU_SOURCE \
-            -DLUA_RELEASE=\"\\\"Lua 5.1.5\\\"\" \
-            -Dprogram_invocation_name=prg_inv_name"
-          
-          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS" || \
-          make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo) EXTRA_CFLAGS="$EXTRA_CFLAGS"
-
-      - name: 6. 发布固件
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
-          tag_name: v25.12-Final-${{ github.run_id }}
-          files: openwrt/bin/targets/x86/64/*combined-efi.img*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 5. 应用配置
+          [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
+          sed -i 's/CONFIG_TARGET
