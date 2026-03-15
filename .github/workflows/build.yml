@@ -1,4 +1,4 @@
-name: OpenWrt-V46
+name: OpenWrt-V47
 
 on:
   workflow_dispatch:
@@ -20,11 +20,10 @@ jobs:
       - name: 1. Checkout
         uses: actions/checkout@v4
 
-      - name: 2. 系统环境极致补全 (增加 PAM 库)
+      - name: 2. 系统环境极致补全
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo apt-get update
-          # 增加了 libpam0g-dev 以修复 util-linux 编译
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev help2man texinfo libpam0g-dev
           
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -37,17 +36,20 @@ jobs:
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           ./scripts/feeds update -a
-          # 抹除 Makefile 对 rust/host 的显式锁定
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install -a
 
-      - name: 4. 配置注入与故障物理切除
+      - name: 4. 配置注入与源码物理修复
         run: |
           cd openwrt
-          # 物理抹除分区大小限制
+          # 抹除分区大小检查
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 修复 mtools 编译逻辑
+          # 【V47 核心：修复 util-linux 源码冲突】
+          # 针对 Ubuntu 24.04 的 GCC 环境，强行注释或修改导致报错的宏定义
+          find build_dir/ -name "c.h" | xargs sed -i 's/static inline int program_invocation_name/extern char \*program_invocation_name/g' 2>/dev/null || true
+          
+          # 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
 
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
@@ -65,24 +67,7 @@ jobs:
           sed -i 's/=m/=y/g' .config
           make defconfig
 
-      - name: 5. 编译执行 (容错模式)
+      - name: 5. 最终编译执行 (兼容性参数注入)
         run: |
           cd openwrt
-          source $HOME/.cargo/env
-          export PATH="$HOME/.cargo/bin:$PATH"
-          
-          # 强制忽略下载失败，继续编译（防止个别包下载不顺拖累全场）
-          make download -j8 || true
-          find dl -size -1k -exec rm -f {} +
-          
-          # 正式编译
-          make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
-
-      - name: 6. 固件发布
-        uses: softprops/action-gh-release@v2
-        if: success()
-        with:
-          tag_name: v25.12-F-${{ github.run_id }}
-          files: openwrt/bin/targets/x86/64/*combined-efi.img*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          source $HOME/.cargo
