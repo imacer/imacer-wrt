@@ -1,4 +1,4 @@
-name: OpenWrt-V69
+name: OpenWrt-V70
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 深度修复与配置极致精简
+      - name: 4. 深度修复与配置注入
         run: |
           cd openwrt
           # 1. 物理屏蔽分区限制
@@ -52,10 +52,10 @@ jobs:
           # 3. GCC 14 全局容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 4. 全局 Makefile 拦截：修复 C 函数声明缺失 (SSR/Trojan-plus)
+          # 4. 全局 Makefile 拦截 (SSR/Trojan-plus)
           sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" | xargs grep -l "setpwent" | xargs sed -i "1i #include <pwd.h>\\n#include <grp.h>" 2>/dev/null || true' package/Makefile
 
-          # 5. 配置注入与“剔除报错组件”
+          # 5. 配置注入 (剔除 brook)
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -65,12 +65,11 @@ jobs:
             echo "CONFIG_PACKAGE_luci-compat=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
             echo "CONFIG_PACKAGE_rust=n"
-            # 物理剔除引发 Go 错误的 brook
             echo "CONFIG_PACKAGE_brook=n"
           } >> .config
           make defconfig
 
-      - name: 5. 编译执行
+      - name: 5. 编译执行 (精准消杀版)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -81,8 +80,9 @@ jobs:
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 消杀环节 (util-linux 冲突)
-          find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
+          # 【V70 修正点】：精准定位消杀范围，避开 host 目录，消除 Permission denied 报错
+          # 只扫描目标架构的 build 目录
+          find build_dir/target-x86_64_musl/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
           
           # 最终全量编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
