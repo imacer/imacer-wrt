@@ -1,4 +1,4 @@
-name: OpenWrt-V67
+name: OpenWrt-V68
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev help2man texinfo libpam0g-dev
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev help2man texinfo libpam0g-dev golang-go
           
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
@@ -37,6 +37,11 @@ jobs:
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
           ./scripts/feeds update -a
+          
+          # 【V68 核心】：在安装前强制升级 Go 语言包版本定义
+          # 这会欺骗 Brook，让它使用更高版本的 Go 编译规则
+          find feeds/packages/lang/golang -name "Makefile" | xargs sed -i 's/GO_VERSION:=.*/GO_VERSION:=1.23.1/g' 2>/dev/null || true
+          
           ./scripts/feeds install -a
 
       - name: 4. 深度修复与配置注入
@@ -52,9 +57,7 @@ jobs:
           # 3. 针对 GCC 14 的全局容错标志
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
-          # 4. 【V67 核心修复】：精准拦截 passwall 及其依赖包的头文件缺失
-          # 我们直接在全局的包编译规则中增加一个通用补丁：只要源码包含 setpwent，就注入头文件
-          # 这样可以一次性解决 SSR、Trojan-plus 以及后续可能出现的类似问题
+          # 4. 全局 Makefile 拦截：修复 C 函数声明缺失 (SSR/Trojan-plus)
           sed -i '/define Build\/Compile/a \	find $(PKG_BUILD_DIR) -name "*.c" -o -name "*.cpp" | xargs grep -l "setpwent" | xargs sed -i "1i #include <pwd.h>\\n#include <grp.h>" 2>/dev/null || true' package/Makefile
 
           # 5. 修复 mtools
@@ -84,7 +87,7 @@ jobs:
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 【消杀环节】：处理 util-linux 冲突
+          # 消杀环节
           find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
           
           # 最终编译
