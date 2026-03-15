@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-Final-V23
+name: OpenWrt-25.12-Final-V24-Victory
 
 on:
   workflow_dispatch:
@@ -20,9 +20,8 @@ jobs:
       - name: 1. 检出仓库
         uses: actions/checkout@v4
 
-      - name: 2. 极致磁盘清理 (V23 增强版)
+      - name: 2. 极致磁盘清理 (确保物理空间充足)
         run: |
-          # 删掉一切能删的，确保有 35GB+ 可用空间
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /opt/hostedtoolcache
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git gperf haveged lrzsz libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm liblzo2-dev make scons squashfs-tools upx-ucl unzip vim wget xmlto xxd zlib1g-dev
@@ -41,7 +40,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 重写 Rust Makefile (V23 保持虚无化)
+          # 重写 Rust Makefile
           RUST_MAKEFILE=$(find feeds/packages/lang/rust/ -name "Makefile" 2>/dev/null | head -n 1)
           if [ -f "$RUST_MAKEFILE" ]; then
             echo 'include $(TOPDIR)/rules.mk' > "$RUST_MAKEFILE"
@@ -54,17 +53,18 @@ jobs:
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install luci-compat luci-lua-runtime
 
-      - name: 4. 注入配置与镜像瘦身
+      - name: 4. 注入配置与“分区扩容”
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
           
-          # 【V23 核心策略：只生成 EFI 联合镜像，不生成其他乱七八糟的格式，节省打包空间】
-          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=400" >> .config
+          # 【V24 核心修正：直接拉高到 2048MB，彻底撑破报错边界】
+          sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=128/g' .config
+          sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=2048/g' .config
+          
+          # 只生成 combined-efi 镜像，减少打包压力
           echo "CONFIG_TARGET_IMAGES_GZIP=y" >> .config
-          echo "# CONFIG_TARGET_ROOTFS_EXT4FS is not set" >> .config
           echo "# CONFIG_VMDK_IMAGES is not set" >> .config
-          echo "# CONFIG_VHDX_IMAGES is not set" >> .config
           
           sed -i 's/SNAPSHOT/25.12.0/g' include/version.mk
           {
@@ -91,7 +91,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export CARGO_HOME="$HOME/.cargo"
 
-          # 彻底清理 dl 目录，为最后的镜像制作腾出所有空间
+          # 编译前下载并清空 dl，确保物理空间绝对安全
           make download -j8
           rm -rf dl/*
           
@@ -101,7 +101,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: success()
         with:
-          tag_name: 25.12.0-Final-Master
+          tag_name: 25.12.0-Final-Victory
           files: openwrt/bin/targets/x86/64/*combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
