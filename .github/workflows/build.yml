@@ -1,4 +1,4 @@
-name: OpenWrt-V52
+name: OpenWrt-V53
 
 on:
   workflow_dispatch:
@@ -29,27 +29,37 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: 3. 源码检出与 Feeds 配置
+      - name: 3. 源码检出与加速配置
         run: |
           rm -rf openwrt
           git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
           cd openwrt
+          # 使用更稳定的源
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
+          
           ./scripts/feeds update -a
           find package/feeds/ -name "Makefile" | xargs sed -i 's/rust\/host//g' 2>/dev/null || true
           ./scripts/feeds install -a
 
-      - name: 4. 核心手术与配置注入
+      - name: 4. 配置注入与“强制补丁手术”
         run: |
           cd openwrt
           # 1. 物理屏蔽分区大小限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 全局注入 GCC 兼容性参数
+          # 2. 全局注入 GCC 14 兼容性参数
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -D_GNU_SOURCE /' include/target.mk
           
-          # 3. 配置文件应用
+          # 3. 【V53 核心修复】：预修复 Lua 源码报错
+          # 在编译前强制在 lua.h 中注入版本号定义，防止 LUA_RELEASE 报错
+          mkdir -p package/utils/lua/patches
+          echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-fix-release-macro.patch
+
+          # 4. 修复 util-linux 冲突
+          find package/utils/util-linux -name "Makefile" | xargs sed -i '/PKG_FLAGS:=/a TARGET_CFLAGS += -Dprogram_invocation_name=prg_inv_name' 2>/dev/null || true
+
+          # 5. 配置文件应用
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
@@ -63,31 +73,19 @@ jobs:
           
           make defconfig
 
-      - name: 5. 下载并强制修复源码冲突
+      - name: 5. 编译执行 (含网络重试)
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
-          # 先下载工具源码（可能会报错，报错也继续，因为我们要手动干预）
-          make download -j8 || true
+          # 尝试多次下载，防止 403 导致缺件
+          make download -j8 || make download -j1 V=s || true
           
-          # 【V52 杀手锏：在源码解压后、正式编译前，暴力切除冲突代码】
-          # 我们直接修改 package Makefile，让它在解压后自动跑一遍 sed 修复
-          find package/utils/util-linux -name "Makefile" | xargs sed -i '/PKG_SOURCE_URL:=/a EXTRA_CFLAGS += -fcommon -Dprogram_invocation_name=prg_inv_name' 2>/dev/null || true
-          
-          # 针对已经可能解压的目录进行一次性清理
-          find build_dir/ -name "c.h" | xargs sed -i 's/extern char \*program_invocation_name;/\/\/removed/g' 2>/dev/null || true
-
-      - name: 6. 正式编译执行
-        run: |
-          cd openwrt
-          [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
-          
-          # 开启全核心编译
+          # 正式开启编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
-      - name: 7. 发布固件
+      - name: 6. 发布固件
         uses: softprops/action-gh-release@v2
         if: success()
         with:
