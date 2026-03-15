@@ -1,4 +1,4 @@
-name: OpenWrt-V64
+name: OpenWrt-V65
 
 on:
   workflow_dispatch:
@@ -49,10 +49,9 @@ jobs:
           mkdir -p package/utils/lua/patches
           echo -e '--- a/src/lua.h\n+++ b/src/lua.h\n@@ -19,1 +19,2 @@\n #define LUA_VERSION\t"Lua 5.1"\n+#define LUA_RELEASE\t"Lua 5.1.5"' > package/utils/lua/patches/999-force-lua-release.patch
 
-          # 3. 【V64 核心修复】：针对 GCC 14 的全局宏定义修正
-          # 我们不再修改 util-linux 的 Makefile，而是直接在 include/target.mk 中定义宏
-          # 把 program_invocation_name 彻底屏蔽，防止所有包产生冲突
-          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -D_GNU_SOURCE -Dprogram_invocation_name=prg_inv_name -Dprogram_invocation_short_name=prg_inv_s_name /' include/target.mk
+          # 3. 【V65 核心修复】：全局注入安全标志，移除会导致内核冲突的 -D 宏
+          # 我们仅保留最基础的 GCC 14 兼容标志
+          sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -D_GNU_SOURCE /' include/target.mk
           
           # 4. 修复 mtools
           [ -d tools/mtools ] && sed -i 's/$(MAKE) -C $(HOST_BUILD_DIR) install/$(MAKE) -C $(HOST_BUILD_DIR) install-exec/g' tools/mtools/Makefile
@@ -70,18 +69,23 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: 5. 分阶段稳健编译
+      - name: 5. 编译与“实时消杀”执行
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
           
           make download -j8 || true
           
-          # 核心路径确认
+          # 核心步骤：先解压并执行一次针对冲突声明的物理注释
+          # 这能解决 util-linux 在 GCC 14 下的声明冲突问题
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 最终编译
+          # 【V65 杀手锏】：在编译 package 之前，强行扫描解压后的源码，删除引起冲突的 extern 声明
+          find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_name;//g' 2>/dev/null || true
+          find build_dir/ -name "*.h" -o -name "*.c" | xargs sed -i 's/extern char \*program_invocation_short_name;//g' 2>/dev/null || true
+          
+          # 最终全量编译
           make -j$(nproc) RUSTC=$(which rustc) CARGO=$(which cargo) || \
           make -j1 V=s RUSTC=$(which rustc) CARGO=$(which cargo)
 
