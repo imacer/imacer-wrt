@@ -1,4 +1,4 @@
-name: OpenWrt-25.12-V36
+name: OpenWrt-V37
 
 on:
   workflow_dispatch:
@@ -34,8 +34,6 @@ jobs:
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
           ./scripts/feeds update -a
-          
-          # 手动创建合法的 Rust 占位包
           mkdir -p package/lang/rust
           cat << 'EOF' > package/lang/rust/Makefile
 include $(TOPDIR)/rules.mk
@@ -44,16 +42,13 @@ PKG_VERSION:=custom
 include $(INCLUDE_DIR)/host-build.mk
 $(eval $(call HostBuild))
 EOF
-          
           ./scripts/feeds install -a
-          # 禁用根分区大小校验
           find target/linux/x86/ -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
 
       - name: 4. Config Injection
         run: |
           [ -f $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 强制设置分区与镜像格式
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=1024/g' .config
           {
@@ -67,13 +62,22 @@ EOF
           sed -i 's/=m/=y/g' .config
           make defconfig
 
-      - name: 5. Build Firmware
+      - name: 5. Final Build
         run: |
           cd openwrt
           source $HOME/.cargo/env
-          # 建立工具链软链接
-          mkdir -p staging_dir/host/bin
-          mkdir -p staging_dir/host/stamp
+          mkdir -p staging_dir/host/bin staging_dir/host/stamp
           ln -sf $(which rustc) staging_dir/host/bin/rustc
           ln -sf $(which cargo) staging_dir/host/bin/cargo
-          touch staging_dir/host/stamp/.rust_
+          touch staging_dir/host/stamp/.rust_installed
+          make download -j8
+          make -j$(nproc) PATH="$HOME/.cargo/bin:$PATH" || make -j1 V=s PATH="$HOME/.cargo/bin:$PATH"
+
+      - name: 6. Release
+        uses: softprops/action-gh-release@v1
+        if: success()
+        with:
+          tag_name: v25.12-F-${{ github.run_id }}
+          files: openwrt/bin/targets/x86/64/*combined-efi.img*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
