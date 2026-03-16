@@ -1,4 +1,4 @@
-name: OpenWrt-V87
+name: OpenWrt-V88
 
 on:
   workflow_dispatch:
@@ -41,21 +41,22 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 4. 深度修复与配置注入
+      - name: 4. 深度修复与全域参数注入
         run: |
           cd openwrt
           # 1. 屏蔽分区限制
           find . -type f -name "*.mk" -o -name "Makefile" | xargs sed -i 's/$(error The rootfs is too large/@echo Warning/g' 2>/dev/null || true
           
-          # 2. 【V87 关键修复】：不再用 sed 删除，改用 CFLAGS 重命名冲突变量
-          # 这是修复 GCC 14 下 program_invocation_name 冲突的最标准做法
+          # 2. 【V88 核心修复】：通过 CPPFLAGS 强行注入 Lua 宏和 GCC 14 兼容参数
+          # 解决了 LUA_RELEASE 缺失导致的编译中断，同时重命名 util-linux 冲突变量
           sed -i 's/TARGET_CFLAGS +=/TARGET_CFLAGS += -fcommon -fpermissive -Dprogram_invocation_name=prg_inv_name -Dprogram_invocation_short_name=prg_inv_sname -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=redundant-decls -D_GNU_SOURCE -include pwd.h -include grp.h /' include/target.mk
+          echo 'TARGET_CPPFLAGS += -DLUA_RELEASE=\"5.1.5\"' >> include/target.mk
           
           # 3. 修复翻译路径
           mkdir -p package/feeds/passwall/luci-app-passwall/po/zh-cn
           [ -d package/feeds/passwall/luci-app-passwall/po/zh_Hans ] && cp package/feeds/passwall/luci-app-passwall/po/zh_Hans/*.po package/feeds/passwall/luci-app-passwall/po/zh-cn/ 2>/dev/null || true
 
-          # 4. 配置注入
+          # 4. 配置注入与分区锁定
           [ -f ../$CONFIG_FILE ] && cp ../$CONFIG_FILE .config
           sed -i 's/CONFIG_TARGET_KERNEL_PARTSIZE=.*/CONFIG_TARGET_KERNEL_PARTSIZE=64/g' .config
           sed -i 's/CONFIG_TARGET_ROOTFS_PARTSIZE=.*/CONFIG_TARGET_ROOTFS_PARTSIZE=512/g' .config
@@ -72,18 +73,16 @@ jobs:
         run: |
           cd openwrt
           [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
-          
-          # 预下载，防止中途断网
           make download -j16
           
-          # 先过 tools 和 toolchain
+          # 分段构建以确保稳定性
           make tools/install -j$(nproc) || make tools/install -j1 V=s
           make toolchain/install -j$(nproc) || make toolchain/install -j1 V=s
           
-          # 清理 dl 目录腾空间
+          # 释放 dl 空间
           rm -rf dl/*
           
-          # 全量编译
+          # 最终全量编译
           make -j$(nproc) || make -j1 V=s
 
       - name: 6. 整理并发布
